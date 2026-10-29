@@ -1,6 +1,6 @@
 [project]
 name = "pi-recovery"
-version = "0.0.2"
+version = "0.0.3"
 description = "Guarded Alertmanager-driven PoE recovery for Raspberry Pi clusters"
 requires-python = ">=3.12"
 dependencies = []

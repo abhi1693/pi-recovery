@@ -49,6 +49,20 @@ def load_per_core_query(instance):
     return 'node_load1' + selector + '/scalar(count(node_cpu_seconds_total' + cpu + '))'
 
 
+def resource_queries(instance):
+    selector = '{instance=' + json.dumps(instance) + '}'
+    idle = '{instance=' + json.dumps(instance) + ',mode="idle"}'
+    uptime = '(node_time_seconds' + selector + '-node_boot_time_seconds' + selector + ')'
+    cpu_rate = '100*(1-avg(rate(node_cpu_seconds_total' + idle + '[2m])))'
+    cpu_boot = ('(100*(1-sum(node_cpu_seconds_total' + idle + ')/(count(node_cpu_seconds_total'
+                + idle + ')*scalar(' + uptime + ')))) and on() (' + uptime + ' >= 120)')
+    io_rate = '100*rate(node_pressure_io_waiting_seconds_total' + selector + '[2m])'
+    io_boot = ('(100*node_pressure_io_waiting_seconds_total' + selector + '/scalar(' + uptime
+               + ')) and on() (' + uptime + ' >= 120)')
+    return {'cpu_rate': cpu_rate, 'cpu_boot': cpu_boot, 'io_rate': io_rate, 'io_boot': io_boot,
+            'uptime': uptime}
+
+
 class Transport:
     def request(self, origin, path, method='GET', body=None, headers=None, ca=None, pin=None):
         parsed = urllib.parse.urlsplit(origin)
@@ -118,10 +132,17 @@ class Backend:
         require(all(-15 <= evaluated_at - float(row['value'][0]) <= 30 for row in rows), 'stale_metrics')
         return rows
 
-    def scalar(self, query, at=None):
+    def scalar(self, query, at=None, check='metrics'):
         rows = self.prom(query, at=at)
-        require(len(rows) == 1, 'missing_or_ambiguous_metrics')
+        require(len(rows) == 1, 'missing_or_ambiguous_' + check)
         return float(rows[0]['value'][1])
+
+    def resource_value(self, rate_query, boot_query, at, check):
+        rows = self.prom(rate_query, at=at)
+        require(len(rows) <= 1, 'missing_or_ambiguous_' + check)
+        if rows:
+            return float(rows[0]['value'][1]), 'rate'
+        return self.scalar(boot_query, at=at, check=check), 'boot_average'
 
     @staticmethod
     def probe(address, port):
@@ -214,12 +235,15 @@ class Backend:
         require(0 <= now - number(pre_failure_at) <= 3600, 'pre_failure_evidence_expired')
         sources = ('{instance="' + instance + '",__name__=~"'
                    'node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|'
-                   'node_load1|node_pressure_io_waiting_seconds_total|node_boot_time_seconds"}')
+                   'node_load1|node_pressure_io_waiting_seconds_total|node_boot_time_seconds|node_time_seconds"}')
         oldest_source = self.scalar('min(timestamp(label_replace(' + sources
                                     + ', "source_metric", "$1", "__name__", "(.+)")))', at=pre_failure_at)
         require(0 <= pre_failure_at - oldest_source <= 90, 'stale_pre_failure_metrics')
-        cpu_selector = '{instance="' + instance + '",mode="idle"}'
-        cpu = '100*(1-avg(rate(node_cpu_seconds_total' + cpu_selector + '[2m])))'
+        queries = resource_queries(instance)
+        cpu_pct, cpu_evidence = self.resource_value(queries['cpu_rate'], queries['cpu_boot'],
+                                                   pre_failure_at, 'pre_failure_cpu')
+        io_pct, io_evidence = self.resource_value(queries['io_rate'], queries['io_boot'],
+                                                 pre_failure_at, 'pre_failure_io_pressure')
         snapshot = {'at': now, 'api_time': api_time, 'observer_node': self.observer,
                     'node_set': sorted(inventory), 'live_alert': live_alert, 'target_ready': ready(target),
                     'maintenance': maintenance, 'node_uid': target['metadata']['uid'],
@@ -239,13 +263,14 @@ class Backend:
                                    and self.scalar('max_over_time(up' + selector + '[2m])') == 0,
                     'down_samples': self.scalar('count_over_time(up' + selector + '[2m])'),
                     'pre_failure_at': pre_failure_at,
+                    'pre_failure_uptime': self.scalar(queries['uptime'], at=pre_failure_at,
+                                                      check='pre_failure_uptime'),
                     'boot_age': now - self.scalar('node_boot_time_seconds' + device_selector, at=pre_failure_at),
-                    'cpu_pct': self.scalar(cpu, at=pre_failure_at),
+                    'cpu_pct': cpu_pct, 'cpu_evidence': cpu_evidence, 'io_evidence': io_evidence,
                     'memory_pct': self.scalar('100*(1-node_memory_MemAvailable_bytes' + device_selector
                                                + '/node_memory_MemTotal_bytes' + device_selector + ')', at=pre_failure_at),
                     'load_per_core': self.scalar(load_per_core_query(instance), at=pre_failure_at),
-                    'io_pressure_pct': self.scalar('100*rate(node_pressure_io_waiting_seconds_total'
-                                                  + device_selector + '[2m])', at=pre_failure_at),
+                    'io_pressure_pct': io_pct,
                     **self.switch(node)}
         return snapshot
 
@@ -337,6 +362,7 @@ class Engine:
                 samples.append(sample)
                 event('observed', node=node, sample=len(samples),
                       port_identity=port_identity(sample['port'], self.backend.config['nodes'][node]),
+                      cpu_evidence=sample['cpu_evidence'], io_evidence=sample['io_evidence'],
                       switch_seen=sample['switch_seen'], tx_from_pi=sample['port']['rx_packets'],
                       tx_toward_pi=sample['port']['tx_packets'])
                 if len(samples) >= 3:

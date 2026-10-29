@@ -46,6 +46,7 @@ def sample(now=NOW, tx_toward_pi=1000):
             'peers_ready': True, 'peers_scraped': True, 'peer_probes_ok': True,
             'target_probe_results': ['no_reply'] * 3, 'scrape_down': True, 'down_samples': 6,
             'pre_failure_at': now-300,
+            'pre_failure_uptime': 300, 'cpu_evidence': 'rate', 'io_evidence': 'rate',
             'boot_age': 20000, 'cpu_pct': 15, 'memory_pct': 23, 'load_per_core': 0.2,
             'io_pressure_pct': 0.1, 'switch_online': True, 'switch_mac': config()['switch_mac'],
             'switch_seen': now-5, 'switch_uptime': 120000+now-NOW,
@@ -62,6 +63,17 @@ def samples():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_boot_averages_require_measured_uptime_and_valid_resource_values(self):
+        item = sample(); item.update(cpu_evidence='boot_average', io_evidence='boot_average')
+        snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+        item['pre_failure_uptime'] = 119
+        with self.assertRaisesRegex(Blocked, 'insufficient_boot_evidence'):
+            snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+        for key in ('cpu_pct', 'memory_pct', 'load_per_core', 'io_pressure_pct'):
+            item = sample(); item[key] = -1
+            with self.subTest(key=key), self.assertRaisesRegex(Blocked, 'resource_saturation'):
+                snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+
     def test_control_plane_priority_and_multi_node_health_guards(self):
         item = sample()
         item['unavailable_nodes'] = ['k8s-rpi3', 'k8s-rpi7']
@@ -319,6 +331,20 @@ class FakeBackend:
 
 
 class EngineTests(unittest.TestCase):
+    def test_resource_fallback_uses_real_boot_data_and_rejects_missing_or_ambiguous_data(self):
+        backend = controller.Backend(config())
+        row = {'metric': {}, 'value': [NOW, '10']}
+        with patch.object(backend, 'prom', side_effect=[[], [row]]):
+            self.assertEqual(backend.resource_value('rate', 'boot', NOW, 'pre_failure_cpu'),
+                             (10.0, 'boot_average'))
+        with patch.object(backend, 'prom', return_value=[row]):
+            self.assertEqual(backend.resource_value('rate', 'boot', NOW, 'pre_failure_cpu'), (10.0, 'rate'))
+        with patch.object(backend, 'prom', return_value=[]):
+            with self.assertRaisesRegex(Blocked, 'missing_or_ambiguous_pre_failure_cpu'):
+                backend.resource_value('rate', 'boot', NOW, 'pre_failure_cpu')
+        with patch.object(backend, 'prom', return_value=[row, row]):
+            with self.assertRaisesRegex(Blocked, 'missing_or_ambiguous_pre_failure_cpu'):
+                backend.resource_value('rate', 'boot', NOW, 'pre_failure_cpu')
     def setUp(self):
         controller.STOP.clear()
         self.clock = Clock(); self.backend = FakeBackend(self.clock)

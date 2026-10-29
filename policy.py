@@ -153,9 +153,13 @@ def snapshot_ok(snapshot, node, config, now):
             'outage_not_confirmed')
     require(0 <= now - number(snapshot['pre_failure_at']) <= 3600, 'pre_failure_evidence_expired')
     require(number(snapshot['boot_age']) >= 900, 'recent_boot')
-    require(number(snapshot['cpu_pct']) < 80 and number(snapshot['memory_pct']) < 85
-            and number(snapshot['load_per_core']) < 2
-            and number(snapshot['io_pressure_pct']) < 20, 'resource_saturation')
+    modes = (snapshot['cpu_evidence'], snapshot['io_evidence'])
+    require(all(mode in ('rate', 'boot_average') for mode in modes), 'invalid_evidence_mode')
+    if 'boot_average' in modes:
+        require(number(snapshot['pre_failure_uptime']) >= 120, 'insufficient_boot_evidence')
+    require(0 <= number(snapshot['cpu_pct']) < 80 and 0 <= number(snapshot['memory_pct']) < 85
+            and 0 <= number(snapshot['load_per_core']) < 2
+            and 0 <= number(snapshot['io_pressure_pct']) < 20, 'resource_saturation')
     require(snapshot['switch_online'] is True and snapshot['switch_mac'] == config['switch_mac'],
             'switch_unhealthy_or_wrong')
     require(-15 <= now - number(snapshot['switch_seen']) <= 90
