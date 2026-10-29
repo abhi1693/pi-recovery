@@ -143,6 +143,7 @@ each candidate before a power action is considered.
 
 ```sh
 python3 -m unittest discover -s tests -v
+bash scripts/ci/promql.sh
 docker buildx build --platform linux/arm64 -t pi-recovery:dev --load .
 bash scripts/ci/smoke.sh pi-recovery:dev linux/arm64
 ```
@@ -150,6 +151,8 @@ bash scripts/ci/smoke.sh pi-recovery:dev linux/arm64
 Tests cover matching stalls, stale and incomplete evidence, conflicting ports,
 concurrent replicas, cooldowns, in-progress recovery, ambiguous failures, and
 authenticated HTTP handling. Power operations in tests use fakes.
+The PromQL regression runs the production load query through Prometheus itself
+against labelled fixture series.
 
 CI reuses the Python and container workflows from
 [`abhi1693/actions`](https://github.com/abhi1693/actions). Images are built on

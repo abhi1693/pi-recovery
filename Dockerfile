@@ -5,7 +5,7 @@ FROM docker.io/library/python:3.15-alpine@sha256:ff4d3c9b1a48f646eedd93182aaea38
 RUN rm -rf /usr/local/lib/python3.15/site-packages \
     /usr/local/lib/python3.15/ensurepip /usr/local/bin/pip*
 
-ARG APP_VERSION=0.0.1
+ARG APP_VERSION=0.0.2
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Pi Recovery" \
       org.opencontainers.image.description="Guarded Alertmanager-driven PoE recovery" \

@@ -43,6 +43,12 @@ def is_control_plane(node):
     return any(key in labels for key in ('node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'))
 
 
+def load_per_core_query(instance):
+    selector = '{instance=' + json.dumps(instance) + '}'
+    cpu = '{instance=' + json.dumps(instance) + ',mode="idle"}'
+    return 'node_load1' + selector + '/scalar(count(node_cpu_seconds_total' + cpu + '))'
+
+
 class Transport:
     def request(self, origin, path, method='GET', body=None, headers=None, ca=None, pin=None):
         parsed = urllib.parse.urlsplit(origin)
@@ -237,8 +243,7 @@ class Backend:
                     'cpu_pct': self.scalar(cpu, at=pre_failure_at),
                     'memory_pct': self.scalar('100*(1-node_memory_MemAvailable_bytes' + device_selector
                                                + '/node_memory_MemTotal_bytes' + device_selector + ')', at=pre_failure_at),
-                    'load_per_core': self.scalar('node_load1' + device_selector
-                                                + '/count(node_cpu_seconds_total' + cpu_selector + ')', at=pre_failure_at),
+                    'load_per_core': self.scalar(load_per_core_query(instance), at=pre_failure_at),
                     'io_pressure_pct': self.scalar('100*rate(node_pressure_io_waiting_seconds_total'
                                                   + device_selector + '[2m])', at=pre_failure_at),
                     **self.switch(node)}

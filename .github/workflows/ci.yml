@@ -23,6 +23,7 @@ jobs:
       enable-cache: false
       sync-command: python -m compileall -q controller.py policy.py
       test-command: python -m unittest discover -s tests -v
+      validation-command: bash scripts/ci/promql.sh
   images:
     needs: tests
     uses: abhi1693/actions/.github/workflows/container-images.yml@4bc25a3100cbfbece517ddad161d59d13c029675 # v1
