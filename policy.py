@@ -60,6 +60,11 @@ def validate_config(config):
     require(2 <= len(config['nodes']) <= 64, 'invalid_config')
     config.setdefault('node_exporter_port', int(os.environ.get('NODE_EXPORTER_PORT', '9100')))
     config.setdefault('approved_kernel', os.environ.get('APPROVED_KERNEL', ''))
+    config.setdefault('cooldown_seconds', 300)
+    config.setdefault('max_unavailable_nodes', min(2, len(config['nodes'])-1))
+    require(type(config['cooldown_seconds']) is int and config['cooldown_seconds'] > 0, 'invalid_config')
+    require(type(config['max_unavailable_nodes']) is int
+            and 1 <= config['max_unavailable_nodes'] < len(config['nodes']), 'invalid_config')
     require(type(config['node_exporter_port']) is int and 1 <= config['node_exporter_port'] <= 65535,
             'invalid_config')
     require(isinstance(config['approved_kernel'], str) and 0 < len(config['approved_kernel']) <= 128,
@@ -131,6 +136,16 @@ def snapshot_ok(snapshot, node, config, now):
     require(snapshot['maintenance'] is False, 'maintenance')
     require(snapshot['kernel'] == config['approved_kernel'], 'kernel_not_approved')
     require(snapshot['address'] == expected['address'], 'conflicting_identity')
+    unavailable = snapshot['unavailable_nodes']
+    require(isinstance(unavailable, list) and node in unavailable
+            and len(set(unavailable)) == len(unavailable)
+            and set(unavailable) <= set(config['nodes'])
+            and len(unavailable) <= config.get('max_unavailable_nodes', 2), 'too_many_nodes_unavailable')
+    control_planes = snapshot['control_plane_nodes']
+    require(set(control_planes) <= set(config['nodes']), 'invalid_control_plane_inventory')
+    require(node in control_planes or not set(unavailable).intersection(control_planes),
+            'control_plane_recovery_priority')
+    require(snapshot['control_plane_quorum_ok'] is True, 'control_plane_quorum_unhealthy')
     require(snapshot['peers_ready'] is True and snapshot['peers_scraped'] is True
             and snapshot['peer_probes_ok'] is True, 'other_nodes_or_observer_unhealthy')
     require(snapshot['target_probe_results'] == ['no_reply'] * 3, 'target_responds_or_probe_error')
@@ -182,12 +197,12 @@ def confirm(samples, node, config, now):
             'port_identity': port_identity(last['port'], config['nodes'][node])}
 
 
-def cooldown_ok(state, node, now, acknowledge=''):
+def cooldown_ok(state, node, now, acknowledge='', cooldown_seconds=300):
     if state.get('phase') in ('reserved', 'verifying', 'failed', 'uncertain'):
         require(bool(acknowledge) and acknowledge == state.get('action_id'), 'recovery_interlock')
     actions = state.get('actions', [])
     require(all(0 <= now - number(a['at']) for a in actions), 'clock_skew')
-    require(not any(now - a['at'] < 1800 for a in actions), 'global_cooldown')
+    require(not any(now - a['at'] < cooldown_seconds for a in actions), 'global_cooldown')
 
 
 def review_required(state, now):

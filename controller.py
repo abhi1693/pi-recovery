@@ -6,6 +6,7 @@ from email.utils import parsedate_to_datetime
 import errno
 import hashlib
 import hmac
+import itertools
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -35,6 +36,11 @@ def event(outcome, **fields):
     print(json.dumps({'event': 'pi_recovery', 'outcome': outcome,
                       'observer_node': os.environ.get('NODE_NAME', ''),
                       'pod': os.environ.get('HOSTNAME', ''), **fields}), flush=True)
+
+
+def is_control_plane(node):
+    labels = node['metadata'].get('labels', {})
+    return any(key in labels for key in ('node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'))
 
 
 class Transport:
@@ -124,6 +130,12 @@ class Backend:
     def node(self, name):
         return self.kube('/api/v1/nodes/' + name)[0]
 
+    def candidate_priorities(self):
+        nodes, _ = self.kube('/api/v1/nodes')
+        require(sorted(n['metadata']['name'] for n in nodes['items']) == sorted(self.config['nodes']),
+                'inventory_changed')
+        return {n['metadata']['name']: 0 if is_control_plane(n) else 1 for n in nodes['items']}
+
     def switch(self, node):
         cfg = self.config
         require(self.unifi('/integration/v1/info')['applicationVersion'] == cfg['unifi_application_version'],
@@ -163,7 +175,11 @@ class Backend:
         target = inventory[node]
         def ready(n):
             return next((c['status'] for c in n['status']['conditions'] if c['type'] == 'Ready'), 'Missing')
-        peers = [n for name, n in inventory.items() if name != node]
+        unavailable = sorted(name for name, n in inventory.items() if ready(n) != 'True')
+        healthy_peers = [name for name, n in inventory.items() if name != node and ready(n) == 'True']
+        control_planes = sorted(name for name, n in inventory.items() if is_control_plane(n))
+        quorum_ok = (not control_planes or
+                     sum(ready(inventory[name]) == 'True' for name in control_planes) >= len(control_planes)//2+1)
         maintenance = any(n['spec'].get('unschedulable')
                           or n['metadata'].get('deletionTimestamp')
                           or n['metadata'].get('annotations', {}).get(
@@ -177,7 +193,7 @@ class Backend:
         fresh = {r['metric']['instance']: -15 <= float(r['value'][1]) <= 90 for r in ages}
         # Service IPs and alert-provided URLs are never probe destinations.
         probe_targets = [(ips[node]['address'], p) for p in (22, cfg['node_exporter_port'], 10250)]
-        probe_targets += [(ips[name]['address'], 22) for name in sorted(ips) if name != node]
+        probe_targets += [(ips[name]['address'], 22) for name in healthy_peers]
         with ThreadPoolExecutor(max_workers=6) as pool:
             probes = list(pool.map(lambda pair: self.probe(*pair), probe_targets))
         instance = exporter_instance(cfg, node)
@@ -203,9 +219,13 @@ class Backend:
                     'maintenance': maintenance, 'node_uid': target['metadata']['uid'],
                     'boot_id': target['status']['nodeInfo']['bootID'], 'kernel': target['status']['nodeInfo']['kernelVersion'],
                     'address': next(a['address'] for a in target['status']['addresses'] if a['type'] == 'InternalIP'),
-                    'peers_ready': all(ready(n) == 'True' for n in peers),
+                    'unavailable_nodes': unavailable, 'control_plane_nodes': control_planes,
+                    'control_plane_quorum_ok': quorum_ok,
+                    'peers_ready': bool(healthy_peers) and all(ready(n) in ('True', 'Unknown') for n in inventory.values()),
                     'peers_scraped': all(up.get(exporter_instance(cfg, k)) == 1 and fresh.get(exporter_instance(cfg, k))
-                                         for k, v in ips.items() if k != node),
+                                         for k in healthy_peers)
+                                     and all(up.get(exporter_instance(cfg, k)) == 0 and fresh.get(exporter_instance(cfg, k))
+                                             for k in unavailable if k != node),
                     'peer_probes_ok': all(p == 'responding' for p in probes[3:]),
                     'target_probe_results': probes[:3],
                     'scrape_down': up.get(instance) == 0
@@ -247,7 +267,7 @@ class Ledger:
         state = json.loads(lease['metadata'].get('annotations', {}).get(STATE_KEY, '{"phase":"idle","actions":[]}'))
         require(isinstance(state, dict) and isinstance(state.get('actions'), list), 'invalid_recovery_ledger')
         require(state.get('phase') in ('idle', 'observing', 'reserved', 'verifying', 'completed', 'failed', 'uncertain')
-                and len(state['actions']) <= 64, 'invalid_recovery_ledger')
+                and len(state['actions']) <= 128, 'invalid_recovery_ledger')
         return lease, state
 
     def write(self, lease, state):
@@ -261,7 +281,8 @@ class Ledger:
     def acquire(self, node):
         lease, state = self.read()
         now = time.time()
-        cooldown_ok(state, node, now, self.backend.config.get('acknowledge_action_id', ''))
+        cooldown_ok(state, node, now, self.backend.config.get('acknowledge_action_id', ''),
+                    self.backend.config.get('cooldown_seconds', 300))
         spec = lease.get('spec', {})
         if spec.get('holderIdentity') and spec['holderIdentity'] != self.backend.holder:
             require(now - epoch(spec['renewTime']) > spec['leaseDurationSeconds'], 'another_recovery_running')
@@ -274,8 +295,8 @@ class Ledger:
         require(0 <= time.time() - epoch(lease['spec']['renewTime']) < 600, 'expired_recovery_lock')
         if phase == 'reserved':
             require(state['phase'] == 'observing', 'invalid_recovery_phase')
-            cooldown_ok(state, node, time.time())
-            state['actions'] = [a for a in state['actions'] if time.time() - a['at'] < 86400]
+            cooldown_ok(state, node, time.time(), cooldown_seconds=self.backend.config.get('cooldown_seconds', 300))
+            state['actions'] = [a for a in state['actions'] if time.time() - a['at'] < 86400][-127:]
             state['actions'].append({'node': node, 'at': time.time(), 'id': action_id})
             state['action_id'] = action_id
         state['phase'] = phase
@@ -381,11 +402,12 @@ class Engine:
 def make_server(config, backend=None, address=('0.0.0.0', 8080)):
     backend = backend or Backend(config)
     engine = Engine(backend)
-    pending = queue.Queue(maxsize=8)
+    pending = queue.PriorityQueue(maxsize=8)
+    sequence = itertools.count()
     def worker():
         while not STOP.is_set():
             try:
-                alert = pending.get(timeout=1)
+                _, _, alert = pending.get(timeout=1)
             except queue.Empty:
                 continue
             engine.run(alert)
@@ -440,14 +462,17 @@ def make_server(config, backend=None, address=('0.0.0.0', 8080)):
                 alerts = payload['alerts']
                 require(isinstance(alerts, list) and len(alerts) <= 32, 'invalid_alerts')
                 require(all(isinstance(a, dict) and isinstance(a.get('labels'), dict) for a in alerts), 'invalid_alerts')
-                accepted = 0
+                candidates = []
                 for alert in alerts:
                     try:
-                        alert_target(alert, config, time.time())
+                        node = alert_target(alert, config, time.time())
                     except Blocked:
                         continue
-                    pending.put_nowait(alert); accepted += 1
-                self.reply(202, json.dumps({'accepted': accepted}) + '\n')
+                    candidates.append((node, alert))
+                priorities = backend.candidate_priorities() if candidates else {}
+                for node, alert in sorted(candidates, key=lambda item: priorities[item[0]]):
+                    pending.put_nowait((priorities[node], next(sequence), alert))
+                self.reply(202, json.dumps({'accepted': len(candidates)}) + '\n')
             except queue.Full:
                 self.reply(429, 'busy\n')
             except (ValueError, KeyError, TypeError, Blocked):

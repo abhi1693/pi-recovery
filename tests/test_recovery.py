@@ -21,6 +21,7 @@ NOW = 1793286000.0
 def config():
     return {'enabled': True, 'unifi_origin': 'https://192.168.3.1',
             'node_exporter_port': 9796, 'approved_kernel': 'approved-test-kernel',
+            'cooldown_seconds': 300, 'max_unavailable_nodes': 2,
             'prometheus_origin': 'http://thanos-query.cattle-monitoring-system.svc:9090',
             'unifi_application_version': '10.6.109', 'site_id': '00000000-0000-0000-0000-000000000001',
             'switch_id': '00000000-0000-0000-0000-000000000002', 'switch_legacy_id': 'a' * 24,
@@ -39,6 +40,8 @@ def alert(now=NOW):
 def sample(now=NOW, tx_toward_pi=1000):
     return {'at': now, 'api_time': now, 'observer_node': 'k8s-rpi4',
             'node_set': sorted(config()['nodes']), 'live_alert': True, 'target_ready': 'Unknown',
+            'unavailable_nodes': ['k8s-rpi7'],
+            'control_plane_nodes': ['k8s-rpi1', 'k8s-rpi2', 'k8s-rpi3'], 'control_plane_quorum_ok': True,
             'maintenance': False, 'kernel': config()['approved_kernel'], 'address': '192.168.3.107',
             'peers_ready': True, 'peers_scraped': True, 'peer_probes_ok': True,
             'target_probe_results': ['no_reply'] * 3, 'scrape_down': True, 'down_samples': 6,
@@ -59,6 +62,38 @@ def samples():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_control_plane_priority_and_multi_node_health_guards(self):
+        item = sample()
+        item['unavailable_nodes'] = ['k8s-rpi3', 'k8s-rpi7']
+        with self.assertRaisesRegex(Blocked, 'control_plane_recovery_priority'):
+            snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+        item['address'] = config()['nodes']['k8s-rpi3']['address']
+        item['port'].update(idx=3, mac=config()['nodes']['k8s-rpi3']['mac'])
+        snapshot_ok(item, 'k8s-rpi3', config(), NOW)
+        item['control_plane_quorum_ok'] = False
+        with self.assertRaisesRegex(Blocked, 'control_plane_quorum_unhealthy'):
+            snapshot_ok(item, 'k8s-rpi3', config(), NOW)
+        item['control_plane_quorum_ok'] = True
+        item['unavailable_nodes'].append('k8s-rpi8')
+        with self.assertRaisesRegex(Blocked, 'too_many_nodes_unavailable'):
+            snapshot_ok(item, 'k8s-rpi3', config(), NOW)
+
+    def test_two_failed_workers_can_be_checked_without_weakening_other_gates(self):
+        item = sample(); item['unavailable_nodes'] = ['k8s-rpi7', 'k8s-rpi8']
+        snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+        item['peers_scraped'] = False
+        with self.assertRaisesRegex(Blocked, 'other_nodes_or_observer_unhealthy'):
+            snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+
+    def test_cooldown_defaults_to_five_minutes_and_can_be_changed(self):
+        state = {'phase': 'completed', 'actions': [{'node': 'k8s-rpi7', 'at': NOW-299}]}
+        with self.assertRaisesRegex(Blocked, 'global_cooldown'):
+            cooldown_ok(state, 'k8s-rpi7', NOW)
+        state['actions'][0]['at'] = NOW-300
+        cooldown_ok(state, 'k8s-rpi7', NOW)
+        with self.assertRaisesRegex(Blocked, 'global_cooldown'):
+            cooldown_ok(state, 'k8s-rpi7', NOW, cooldown_seconds=600)
+
     def test_installation_settings_are_configurable_without_lab_specific_names(self):
         cfg = config()
         cfg['nodes'] = {'worker-a': {**cfg['nodes']['k8s-rpi1'], 'port': 17},
@@ -66,6 +101,7 @@ class PolicyTests(unittest.TestCase):
         cfg['unifi_origin'] = 'https://controller.example.com'
         cfg['prometheus_origin'] = 'http://prometheus.monitoring.svc:9090'
         cfg['node_exporter_port'] = 9100
+        cfg['max_unavailable_nodes'] = 1
         validate_config(cfg)
         backend = controller.Backend({**cfg, 'lease_namespace': 'recovery', 'lease_name': 'recovery-lock'})
         self.assertEqual(backend.lease_path,
@@ -251,6 +287,10 @@ class FakeBackend:
         self.cycles = []; self.snapshots = 0; self.failure = None
         self.bad_snapshot = None; self.ambiguous_reservation = False
 
+    def candidate_priorities(self):
+        return {name: 0 if name in ('k8s-rpi1', 'k8s-rpi2', 'k8s-rpi3') else 1
+                for name in self.config['nodes']}
+
     def kube(self, path, method='GET', body=None):
         if method == 'GET': return copy.deepcopy(self.lease), self.clock.now()
         require_version = body['metadata']['resourceVersion'] == self.lease['metadata']['resourceVersion']
@@ -303,6 +343,42 @@ class EngineTests(unittest.TestCase):
         self.assertGreaterEqual(self.backend.snapshots, 4)
         self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
         self.assertEqual(self.state()['phase'], 'completed')
+
+    def test_worker_cannot_cycle_if_a_control_plane_fails_during_final_recheck(self):
+        def fail_control_plane(item, count):
+            if count == 4:
+                item['unavailable_nodes'] = ['k8s-rpi3', 'k8s-rpi7']
+        self.backend.bad_snapshot = fail_control_plane
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, [])
+
+    def test_configured_cooldown_applies_to_lease_acquisition(self):
+        self.backend.config['cooldown_seconds'] = 900
+        self.backend.lease['metadata']['annotations'][controller.STATE_KEY] = json.dumps(
+            {'phase': 'completed', 'actions': [{'node': 'k8s-rpi7', 'at': NOW-600}]})
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, [])
+        self.clock.value += 301
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+
+    def test_audit_history_is_bounded_without_becoming_a_hidden_daily_quota(self):
+        actions = [{'node': 'k8s-rpi7', 'at': NOW-400-i*301} for i in range(128)]
+        self.backend.lease['metadata']['annotations'][controller.STATE_KEY] = json.dumps(
+            {'phase': 'completed', 'actions': actions})
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+        self.assertEqual(len(self.state()['actions']), 128)
+
+    def test_priorities_come_from_kubernetes_role_labels(self):
+        backend = controller.Backend(config())
+        nodes = [{'metadata': {'name': name, 'labels': {
+            'node-role.kubernetes.io/control-plane': ''} if name == 'k8s-rpi8' else {}}}
+            for name in config()['nodes']]
+        with patch.object(backend, 'kube', return_value=({'items': nodes}, NOW)):
+            priorities = backend.candidate_priorities()
+        self.assertEqual(priorities['k8s-rpi8'], 0)
+        self.assertEqual(priorities['k8s-rpi3'], 1)
 
     def test_progress_logs_show_lease_ownership_observations_and_completion(self):
         with patch.object(controller, 'event') as log:

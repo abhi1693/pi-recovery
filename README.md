@@ -42,8 +42,8 @@ flowchart LR
 
 - **The outage:** the node is unreachable, its exporter has failed for at least
   two minutes, and independent management probes receive no reply.
-- **The rest of the cluster:** the configured inventory matches, peers remain
-  healthy, and the observing replica is on another node.
+- **The rest of the cluster:** the configured inventory matches, healthy peers
+  remain reachable, control-plane quorum is intact, and the observer is on another node.
 - **The conditions before failure:** CPU, memory, load, I/O pressure, boot age,
   maintenance state, and the reviewed kernel.
 - **The switch:** the pinned controller certificate, reviewed application
@@ -68,7 +68,8 @@ attempt rather than to a permanent primary.
 | Control | Behavior |
 | :--- | :--- |
 | Concurrency | One recovery across the cluster. |
-| Cooldown | At least 30 minutes between power-cycle reservations. |
+| Priority | Unavailable control-plane nodes are recovered before workers. |
+| Cooldown | Five minutes between reservations by default; configurable with `cooldown_seconds`. |
 | Daily quotas | No per-node or cluster-wide daily cap. |
 | Active recovery | Another cycle is blocked while an action is reserved or being verified. |
 | Uncertain result | Failed or ambiguous actions require review before automation resumes. |
@@ -77,6 +78,10 @@ attempt rather than to a permanent primary.
 The action is recorded **before** the non-idempotent switch request. Ambiguous
 power requests are never retried automatically. Recovery is confirmed by a new
 boot ID, the same Kubernetes node identity, Ready status, and a successful scrape.
+Two unavailable nodes can be handled by default. Both alert scheduling and the
+final pre-cycle check enforce control-plane priority, so alert arrival order
+cannot let a worker bypass an unavailable control-plane node. Recent action
+history is bounded for storage; it does not impose a daily recovery quota.
 
 ## Run it
 
@@ -98,6 +103,8 @@ allowing automatic recovery.
 | `approved_kernel` | Kernel release permitted by the recovery policy. |
 | `webhook_token` | Bearer token required on `/webhook`. |
 | `sample_interval_seconds` | At least 30 seconds between observations. |
+| `cooldown_seconds` | Positive seconds between reservations; default `300`. |
+| `max_unavailable_nodes` | Maximum concurrent unavailable nodes to assess; default `2` for clusters with at least three nodes. |
 | `lease_namespace`, `lease_name` | Durable coordination resource. |
 
 `POD_NAMESPACE`, `POD_UID`, and `NODE_NAME` can be populated through Kubernetes'

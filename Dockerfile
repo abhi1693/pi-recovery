@@ -1,5 +1,10 @@
 FROM docker.io/library/python:3.15-alpine@sha256:ff4d3c9b1a48f646eedd93182aaea385c7a5452f4c8a8cd7cef686babacf4928
 
+# The app uses only the standard library. Remove the unused package installer,
+# its vendored dependencies, and bootstrap wheels from the runtime image.
+RUN rm -rf /usr/local/lib/python3.15/site-packages \
+    /usr/local/lib/python3.15/ensurepip /usr/local/bin/pip*
+
 ARG APP_VERSION=0.0.1
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Pi Recovery" \
