@@ -44,16 +44,16 @@ flowchart LR
   remain reachable, control-plane quorum is intact, and the observer is on another node.
 - **The conditions before failure:** CPU, memory, load, I/O pressure, boot age,
   maintenance state, and the reviewed kernel.
+- **The switch:** the pinned controller certificate, reviewed application
+  version, switch identity, port mapping, link state, and PoE health.
+- **The traffic pattern:** traffic from the node remains frozen while traffic
+  toward it advances across fresh, independent switch samples.
 
 If a node loses connectivity after its first post-boot scrape, CPU and I/O rates
 may not exist yet. The receiver can use averages from that boot's cumulative
 counters after at least two minutes of measured uptime. It records the evidence
 mode in the observation log. Missing counters, ambiguous series and invalid
 values continue to block recovery. The recent-boot guard still applies.
-- **The switch:** the pinned controller certificate, reviewed application
-  version, switch identity, port mapping, link state, and PoE health.
-- **The traffic pattern:** traffic from the node remains frozen while traffic
-  toward it advances across fresh, independent switch samples.
 
 When a silent NIC's learned MAC entry ages out, the approved static node-to-port
 mapping can be used. Conflicting MAC evidence, multiple devices, link errors,
