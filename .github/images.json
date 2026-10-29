@@ -6,7 +6,7 @@
       "id": "receiver",
       "context": ".",
       "file": "Dockerfile",
-      "platforms": ["linux/amd64", "linux/arm64"],
+      "platforms": ["linux/arm64"],
       "paths": ["controller.py", "policy.py", "Dockerfile", "scripts/**"],
       "build-args": {"APP_VERSION": "{version}", "REVISION": "{revision}"},
       "smoke-script": "scripts/ci/smoke.sh"

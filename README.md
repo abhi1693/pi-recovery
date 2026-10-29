@@ -6,7 +6,7 @@
   <a href="https://github.com/abhi1693/pi-recovery/actions/workflows/ci.yml"><img src="https://github.com/abhi1693/pi-recovery/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/Version-0.0.1-5e81ac" alt="Version 0.0.1">
   <img src="https://img.shields.io/badge/Python-standard_library-3776AB?logo=python&amp;logoColor=white" alt="Python standard library">
-  <img src="https://img.shields.io/badge/Platforms-ARM64_%C2%B7_AMD64-0f766e" alt="ARM64 and AMD64">
+  <img src="https://img.shields.io/badge/Platform-ARM64-0f766e" alt="ARM64">
   <img src="https://img.shields.io/badge/Coordination-Kubernetes_Lease-326CE5?logo=kubernetes&amp;logoColor=white" alt="Kubernetes Lease">
 </p>
 
@@ -145,8 +145,8 @@ each candidate before a power action is considered.
 
 ```sh
 python3 -m unittest discover -s tests -v
-docker build -t pi-recovery:dev .
-bash scripts/ci/smoke.sh pi-recovery:dev linux/amd64
+docker buildx build --platform linux/arm64 -t pi-recovery:dev --load .
+bash scripts/ci/smoke.sh pi-recovery:dev linux/arm64
 ```
 
 Tests cover matching stalls, stale and incomplete evidence, conflicting ports,
@@ -155,5 +155,5 @@ authenticated HTTP handling. Power operations in tests use fakes.
 
 CI reuses the Python and container workflows from
 [`abhi1693/actions`](https://github.com/abhi1693/actions). Images are built on
-native ARM64 and AMD64 runners, checked with a runtime smoke test, scanned, and
+native ARM64 runners, checked with a runtime smoke test, scanned, and
 published with SBOMs, provenance, and digest attestations.
