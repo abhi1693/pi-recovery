@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/abhi1693/pi-recovery/actions/workflows/ci.yml"><img src="https://github.com/abhi1693/pi-recovery/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/Version-0.0.1-5e81ac" alt="Version 0.0.1">
+  <a href="https://github.com/abhi1693/pi-recovery/releases/latest"><img src="https://img.shields.io/github/v/release/abhi1693/pi-recovery?label=version" alt="Latest version"></a>
   <img src="https://img.shields.io/badge/Platform-ARM64-0f766e" alt="ARM64">
 </p>
 

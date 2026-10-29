@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     uses: abhi1693/actions/.github/workflows/python-ci.yml@4bc25a3100cbfbece517ddad161d59d13c029675 # v1
