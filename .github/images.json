@@ -1,0 +1,15 @@
+{
+  "schema-version": 1,
+  "shared-paths": [".github/**", "pyproject.toml"],
+  "images": [
+    {
+      "id": "receiver",
+      "context": ".",
+      "file": "Dockerfile",
+      "platforms": ["linux/amd64", "linux/arm64"],
+      "paths": ["controller.py", "policy.py", "Dockerfile", "scripts/**"],
+      "build-args": {"APP_VERSION": "{version}", "REVISION": "{revision}"},
+      "smoke-script": "scripts/ci/smoke.sh"
+    }
+  ]
+}

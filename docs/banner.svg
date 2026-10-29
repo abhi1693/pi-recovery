@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
+  <title id="title">Pi Recovery</title>
+  <desc id="desc">Verify the failure. Recover the node.</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101c34"/><stop offset="1" stop-color="#122b36"/></linearGradient><linearGradient id="accent"><stop stop-color="#5eead4"/><stop offset="1" stop-color="#60a5fa"/></linearGradient></defs>
+  <rect width="1280" height="320" rx="20" fill="url(#bg)"/>
+  <g stroke="#2a455a" opacity=".7"><path d="M850 0v320M930 0v320M1010 0v320M1090 0v320M1170 0v320M790 80h490M790 160h490M790 240h490"/></g>
+  <text x="76" y="122" font-family="system-ui,Segoe UI,sans-serif" font-size="58" font-weight="750" fill="#f1f5f9">Pi Recovery</text>
+  <text x="80" y="177" font-family="system-ui,Segoe UI,sans-serif" font-size="25" fill="#b7cad9">Verify the failure. Recover the node.</text>
+  <rect x="80" y="211" width="278" height="35" rx="17" fill="#173e46"/>
+  <circle cx="100" cy="229" r="5" fill="#5eead4"/>
+  <text x="117" y="235" font-family="system-ui,Segoe UI,sans-serif" font-size="16" fill="#99f6e4">Evidence before a power cycle</text>
+  <g fill="#13293b" stroke="url(#accent)" stroke-width="3"><rect x="876" y="93" width="72" height="72" rx="16"/><rect x="1026" y="93" width="72" height="72" rx="16"/><rect x="951" y="207" width="72" height="46" rx="12"/></g>
+  <g stroke="#5eead4" stroke-width="3" fill="none"><path d="M948 129h78M912 165v65h39M1062 165v65h-39"/><path d="M983 106l-12 24h13l-6 23 23-29h-15l9-18"/></g>
+  <circle cx="987" cy="230" r="7" fill="#5eead4"/>
+</svg>
