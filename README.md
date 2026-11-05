@@ -55,6 +55,19 @@ counters after at least two minutes of measured uptime. It records the evidence
 mode in the observation log. Missing counters, ambiguous series and invalid
 values continue to block recovery. The recent-boot guard still applies.
 
+Resource readings describe the last successful scrape, not current load on an
+unreachable host. Saturation within the last five minutes blocks recovery.
+Older saturation can proceed only after at least three minutes of fresh switch
+observations establish a frozen transmit path with advancing inbound traffic.
+All identity, peer, quorum, port and power checks still apply at every observation
+and immediately before reservation. Missing evidence or evidence older than one
+hour still blocks recovery; age alone never authorizes a cycle.
+
+Logs include the historical timestamp, age, resource values and guard decision.
+This policy accepts that an external observer cannot distinguish every silent
+NIC failure from an operating-system or storage hang. It does not declare a
+driver diagnosis or make power loss safe for in-flight writes.
+
 When a silent NIC's learned MAC entry ages out, the approved static node-to-port
 mapping can be used. Conflicting MAC evidence, multiple devices, link errors,
 unhealthy power, or failed checks still block the action.

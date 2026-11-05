@@ -63,6 +63,47 @@ def samples():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_recent_saturation_is_a_veto_at_the_freshness_boundary(self):
+        for key, value in [('cpu_pct', 80), ('memory_pct', 85),
+                           ('load_per_core', 2), ('io_pressure_pct', 20)]:
+            item = sample(); item[key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(Blocked, 'resource_saturation'):
+                snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+            item['pre_failure_at'] -= 1
+            snapshot_ok(item, 'k8s-rpi7', config(), NOW)
+
+    def test_historical_saturation_requires_longer_independent_confirmation(self):
+        items = [sample(NOW+i*30, 1000+i*100) for i in range(7)]
+        for item in items:
+            item.update(pre_failure_at=NOW-600, cpu_pct=82, io_pressure_pct=26)
+        with self.assertRaisesRegex(Blocked, 'historical_saturation_confirmation_pending'):
+            confirm(items[:3], 'k8s-rpi7', config(), NOW+60)
+        confirm(items, 'k8s-rpi7', config(), NOW+180)
+        # Time passing does not excuse missing, nonfinite, expired, or impossible readings.
+        for changes in ({'cpu_pct': float('nan')}, {'cpu_pct': 101},
+                        {'io_pressure_pct': -1}, {'pre_failure_at': NOW-3601}):
+            bad = copy.deepcopy(items); bad[-1].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(Blocked):
+                confirm(bad, 'k8s-rpi7', config(), NOW+180)
+        bad = copy.deepcopy(items); del bad[-1]['cpu_pct']
+        with self.assertRaises(KeyError):
+            confirm(bad, 'k8s-rpi7', config(), NOW+180)
+
+    def test_historical_load_never_overrides_network_or_cluster_safety(self):
+        items = [sample(NOW+i*30, 1000+i*100) for i in range(7)]
+        for item in items:
+            item.update(pre_failure_at=NOW-600, cpu_pct=82, io_pressure_pct=26)
+        for field, value in [('control_plane_quorum_ok', False), ('maintenance', True),
+                             ('peers_scraped', False), ('target_probe_results', ['responding']*3)]:
+            bad = copy.deepcopy(items); bad[-1][field] = value
+            with self.subTest(field=field), self.assertRaises(Blocked):
+                confirm(bad, 'k8s-rpi7', config(), NOW+180)
+        for field, value in [('rx_packets', 4001), ('rx_errors', 1), ('mac', '02:00:00:00:00:ff'),
+                             ('poe_good', False), ('link_down_count', 3)]:
+            bad = copy.deepcopy(items); bad[-1]['port'][field] = value
+            with self.subTest(field=field), self.assertRaises(Blocked):
+                confirm(bad, 'k8s-rpi7', config(), NOW+180)
+
     def test_boot_averages_require_measured_uptime_and_valid_resource_values(self):
         item = sample(); item.update(cpu_evidence='boot_average', io_evidence='boot_average')
         snapshot_ok(item, 'k8s-rpi7', config(), NOW)
@@ -331,6 +372,29 @@ class FakeBackend:
 
 
 class EngineTests(unittest.TestCase):
+    def test_historical_overload_cycles_only_after_extended_confirmation_and_fences_replay(self):
+        def historical(item, count):
+            item.update(pre_failure_at=NOW-600, cpu_pct=82, io_pressure_pct=26)
+        self.backend.bad_snapshot = historical
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+        self.assertGreaterEqual(self.clock.now()-NOW, 180)
+        self.assertEqual(self.state()['phase'], 'completed')
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+
+    def test_historical_overload_final_quorum_loss_and_missing_evidence_cannot_cycle(self):
+        for failure in ('quorum', 'missing'):
+            self.clock.value = NOW; self.backend = FakeBackend(self.clock)
+            def historical(item, count):
+                item.update(pre_failure_at=NOW-600, cpu_pct=82, io_pressure_pct=26)
+                if count == 7:
+                    if failure == 'quorum': item['control_plane_quorum_ok'] = False
+                    else: del item['cpu_pct']
+            self.backend.bad_snapshot = historical
+            self.run_engine()
+            self.assertEqual(self.backend.cycles, [])
+
     def test_resource_fallback_uses_real_boot_data_and_rejects_missing_or_ambiguous_data(self):
         backend = controller.Backend(config())
         row = {'metric': {}, 'value': [NOW, '10']}

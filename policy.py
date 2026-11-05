@@ -11,6 +11,27 @@ class Blocked(Exception):
     """A stable, non-secret reason to refuse automatic recovery."""
 
 
+RESOURCE_FRESH_SECONDS = 300
+HISTORICAL_CONFIRM_SECONDS = 180
+
+
+def resource_context(snapshot, now):
+    """Label pre-outage load honestly; expired or invalid evidence never passes."""
+    age = now - number(snapshot['pre_failure_at'])
+    require(0 <= age <= 3600, 'pre_failure_evidence_expired')
+    values = {key: number(snapshot[key]) for key in
+              ('cpu_pct', 'memory_pct', 'load_per_core', 'io_pressure_pct')}
+    require(all(value >= 0 for value in values.values())
+            and all(values[key] <= 100 for key in ('cpu_pct', 'memory_pct', 'io_pressure_pct')),
+            'resource_saturation')
+    saturated = (values['cpu_pct'] >= 80 or values['memory_pct'] >= 85
+                 or values['load_per_core'] >= 2 or values['io_pressure_pct'] >= 20)
+    guard = (('recent_saturation' if age <= RESOURCE_FRESH_SECONDS else 'historical_saturation')
+             if saturated else 'within_limits')
+    return {'pre_failure_at': snapshot['pre_failure_at'], 'pre_failure_age_seconds': round(age, 1),
+            'resource_guard': guard, **values}
+
+
 def require(condition, reason):
     if not condition:
         raise Blocked(reason)
@@ -157,9 +178,8 @@ def snapshot_ok(snapshot, node, config, now):
     require(all(mode in ('rate', 'boot_average') for mode in modes), 'invalid_evidence_mode')
     if 'boot_average' in modes:
         require(number(snapshot['pre_failure_uptime']) >= 120, 'insufficient_boot_evidence')
-    require(0 <= number(snapshot['cpu_pct']) < 80 and 0 <= number(snapshot['memory_pct']) < 85
-            and 0 <= number(snapshot['load_per_core']) < 2
-            and 0 <= number(snapshot['io_pressure_pct']) < 20, 'resource_saturation')
+    require(resource_context(snapshot, now)['resource_guard'] != 'recent_saturation',
+            'resource_saturation')
     require(snapshot['switch_online'] is True and snapshot['switch_mac'] == config['switch_mac'],
             'switch_unhealthy_or_wrong')
     require(-15 <= now - number(snapshot['switch_seen']) <= 90
@@ -197,6 +217,11 @@ def confirm(samples, node, config, now):
                 'link_or_stp_changed')
     # Switch RX is traffic FROM the Pi. Switch TX is traffic TOWARD the Pi.
     require(last['port']['tx_packets'] - first['port']['tx_packets'] >= 10, 'no_inbound_traffic')
+    # Aging load alone never authorizes power: retain every gate and require
+    # three minutes of independently fresh, directional switch evidence.
+    if any(resource_context(s, s['at'])['resource_guard'] == 'historical_saturation' for s in samples):
+        require(last['at'] - first['at'] >= HISTORICAL_CONFIRM_SECONDS,
+                'historical_saturation_confirmation_pending')
     return {'node': node, 'node_uid': last['node_uid'], 'boot_id': last['boot_id'],
             'port_identity': port_identity(last['port'], config['nodes'][node])}
 

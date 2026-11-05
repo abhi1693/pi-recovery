@@ -22,7 +22,7 @@ import time
 import urllib.parse
 import uuid
 
-from policy import Blocked, alert_target, confirm, cooldown_ok, epoch, exporter_instance, number, port_identity, require, review_required, snapshot_ok, validate_config
+from policy import Blocked, alert_target, confirm, cooldown_ok, epoch, exporter_instance, number, port_identity, require, resource_context, review_required, snapshot_ok, validate_config
 
 STATE_KEY = os.environ.get('PI_RECOVERY_STATE_KEY', 'pi-recovery.io/state')
 STOP = threading.Event()
@@ -347,6 +347,7 @@ class Engine:
     def run(self, alert):
         node = None
         locked = reserved = False
+        context = {}
         try:
             node = alert_target(alert, self.backend.config, time.time())
             event('lease_requested', node=node)
@@ -357,12 +358,15 @@ class Engine:
                 require(not STOP.is_set(), 'shutting_down')
                 if index:
                     require(not self.wait(self.backend.config['sample_interval_seconds']), 'shutting_down')
+                context = {}
                 sample = self.backend.snapshot(node)
+                context = resource_context(sample, time.time())
                 snapshot_ok(sample, node, self.backend.config, time.time())
                 samples.append(sample)
                 event('observed', node=node, sample=len(samples),
                       port_identity=port_identity(sample['port'], self.backend.config['nodes'][node]),
                       cpu_evidence=sample['cpu_evidence'], io_evidence=sample['io_evidence'],
+                      **context,
                       switch_seen=sample['switch_seen'], tx_from_pi=sample['port']['rx_packets'],
                       tx_toward_pi=sample['port']['tx_packets'])
                 if len(samples) >= 3:
@@ -370,7 +374,7 @@ class Engine:
                         identity = confirm(samples, node, self.backend.config, time.time())
                         break
                     except Blocked as error:
-                        if str(error) != 'cached_switch_samples':
+                        if str(error) not in ('cached_switch_samples', 'historical_saturation_confirmation_pending'):
                             raise
             else:
                 raise Blocked('cached_switch_samples')
@@ -407,7 +411,7 @@ class Engine:
             self.ledger.transition('failed', node)
             event('failed', node=node, action_id=action_id)
         except Blocked as error:
-            event('blocked', node=node, reason=str(error))
+            event('blocked', node=node, reason=str(error), **context)
             if reserved:
                 try:
                     self.ledger.transition('uncertain', node)
