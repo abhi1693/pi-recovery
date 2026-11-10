@@ -298,6 +298,12 @@ class Ledger:
         require(isinstance(state, dict) and isinstance(state.get('actions'), list), 'invalid_recovery_ledger')
         require(state.get('phase') in ('idle', 'observing', 'reserved', 'verifying', 'completed', 'failed', 'uncertain')
                 and len(state['actions']) <= 128, 'invalid_recovery_ledger')
+        if 'deferred_failure' in state:
+            deferred = state['deferred_failure']
+            require(isinstance(deferred, dict) and isinstance(deferred.get('id'), str)
+                    and bool(deferred['id']) and deferred.get('node') in self.backend.config['nodes'],
+                    'invalid_recovery_ledger')
+            require(0 <= time.time() - number(deferred.get('at')), 'invalid_recovery_ledger')
         return lease, state
 
     def write(self, lease, state):
@@ -311,13 +317,25 @@ class Ledger:
     def acquire(self, node):
         lease, state = self.read()
         now = time.time()
-        cooldown_ok(state, node, now, self.backend.config.get('acknowledge_action_id', ''),
-                    self.backend.config.get('cooldown_seconds', 300))
+        acknowledge = self.backend.config.get('acknowledge_action_id', '')
+        priorities = (self.backend.candidate_priorities()
+                      if state.get('phase') == 'failed' or state.get('deferred_failure') else None)
+        cooldown_ok(state, node, now, acknowledge,
+                    self.backend.config.get('cooldown_seconds', 300), priorities=priorities)
         spec = lease.get('spec', {})
         if spec.get('holderIdentity') and spec['holderIdentity'] != self.backend.holder:
             require(now - epoch(spec['renewTime']) > spec['leaseDurationSeconds'], 'another_recovery_running')
+        if state.get('deferred_failure', {}).get('id') == acknowledge:
+            state.pop('deferred_failure')
+        if state.get('phase') == 'failed' and state.get('action_id') != acknowledge:
+            # Keep the worker's unresolved failure across observations, completion and restarts.
+            state['deferred_failure'] = copy.deepcopy(state['actions'][-1])
+        deferred = state.get('deferred_failure')
         state['phase'] = 'observing'
         self.write(lease, state)  # resourceVersion fences both replicas; conflicts fail closed.
+        if deferred:
+            event('worker_failure_deferred', node=node, failed_node=deferred['node'],
+                  failed_action_id=deferred['id'])
 
     def transition(self, phase, node, action_id=None):
         lease, state = self.read()
@@ -325,7 +343,9 @@ class Ledger:
         require(0 <= time.time() - epoch(lease['spec']['renewTime']) < 600, 'expired_recovery_lock')
         if phase == 'reserved':
             require(state['phase'] == 'observing', 'invalid_recovery_phase')
-            cooldown_ok(state, node, time.time(), cooldown_seconds=self.backend.config.get('cooldown_seconds', 300))
+            priorities = self.backend.candidate_priorities() if state.get('deferred_failure') else None
+            cooldown_ok(state, node, time.time(), cooldown_seconds=self.backend.config.get('cooldown_seconds', 300),
+                        priorities=priorities)
             state['actions'] = [a for a in state['actions'] if time.time() - a['at'] < 86400][-127:]
             state['actions'].append({'node': node, 'at': time.time(), 'id': action_id})
             state['action_id'] = action_id
@@ -473,7 +493,7 @@ def make_server(config, backend=None, address=('0.0.0.0', 8080)):
                     lines = [f'pi_recovery_events_total{{outcome="{k}"}} {v}' for k, v in sorted(COUNTERS.items())]
                 try:
                     _, state = engine.ledger.read()
-                    lines += [f'pi_recovery_interlock_active {int(state.get("phase") in ("reserved", "verifying", "failed", "uncertain"))}',
+                    lines += [f'pi_recovery_interlock_active {int(bool(state.get("deferred_failure")) or state.get("phase") in ("reserved", "verifying", "failed", "uncertain"))}',
                               f'pi_recovery_review_required {int(review_required(state, time.time()))}',
                               'pi_recovery_ledger_read_ok 1']
                 except Exception:

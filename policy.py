@@ -226,15 +226,32 @@ def confirm(samples, node, config, now):
             'port_identity': port_identity(last['port'], config['nodes'][node])}
 
 
-def cooldown_ok(state, node, now, acknowledge='', cooldown_seconds=300):
+def failed_worker_can_yield(action, node, priorities):
+    """Only a known worker's confirmed failure can yield to a known control plane."""
+    return (bool(action.get('id')) and priorities is not None
+            and priorities.get(node) == 0 and priorities.get(action.get('node')) == 1)
+
+
+def cooldown_ok(state, node, now, acknowledge='', cooldown_seconds=300, priorities=None):
+    deferred = state.get('deferred_failure')
+    if deferred:
+        require((bool(acknowledge) and acknowledge == deferred.get('id'))
+                or failed_worker_can_yield(deferred, node, priorities), 'recovery_interlock')
     if state.get('phase') in ('reserved', 'verifying', 'failed', 'uncertain'):
-        require(bool(acknowledge) and acknowledge == state.get('action_id'), 'recovery_interlock')
+        actions = state.get('actions', [])
+        failed_worker = (state.get('phase') == 'failed' and bool(actions)
+                         and actions[-1].get('id') == state.get('action_id')
+                         and failed_worker_can_yield(actions[-1], node, priorities))
+        require((bool(acknowledge) and acknowledge == state.get('action_id'))
+                or failed_worker, 'recovery_interlock')
     actions = state.get('actions', [])
     require(all(0 <= now - number(a['at']) for a in actions), 'clock_skew')
     require(not any(now - a['at'] < cooldown_seconds for a in actions), 'global_cooldown')
 
 
 def review_required(state, now):
+    if state.get('deferred_failure'):
+        return True
     if state.get('phase') in ('failed', 'uncertain'):
         return True
     if state.get('phase') in ('reserved', 'verifying') and state.get('actions'):
