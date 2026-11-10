@@ -372,6 +372,99 @@ class FakeBackend:
 
 
 class EngineTests(unittest.TestCase):
+    def failed_worker(self):
+        action = {'node': 'k8s-rpi7', 'at': NOW-1800, 'id': 'failed-worker-action'}
+        self.backend.lease['metadata']['annotations'][controller.STATE_KEY] = json.dumps(
+            {'phase': 'failed', 'action_id': action['id'], 'actions': [action]})
+        self.backend.lease['spec'] = {'holderIdentity': 'old-observer', 'leaseDurationSeconds': 900,
+                                     'renewTime': datetime.fromtimestamp(NOW-1200, timezone.utc).isoformat()}
+        return action
+
+    def control_plane_sample(self, item, count):
+        item.update(address='192.168.3.102', unavailable_nodes=['k8s-rpi2', 'k8s-rpi7'])
+        item['port'].update(idx=2, mac='02:00:00:00:00:02')
+
+    def run_control_plane(self):
+        target = alert(); target['labels']['instance'] = '192.168.3.102:9796'
+        controller.Engine(self.backend, wait=self.clock.wait).run(target)
+
+    def test_failed_worker_yields_to_control_plane_and_remains_interlocked_after_success(self):
+        action = self.failed_worker()
+        self.backend.bad_snapshot = self.control_plane_sample
+        self.run_control_plane()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi2'])
+        self.assertEqual(self.state()['phase'], 'completed')
+        self.assertEqual(self.state()['deferred_failure'], action)
+        self.assertTrue(review_required(self.state(), self.clock.now()))
+        self.assertEqual(self.state()['actions'][0], action)
+        self.clock.value += 1000
+        self.backend.bad_snapshot = None
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi2'])
+
+    def test_failed_worker_priority_never_overrides_other_interlocks_or_live_lease(self):
+        for scenario in ('worker', 'uncertain', 'reserved', 'verifying', 'failed-control-plane',
+                         'unknown-node', 'mismatched-action', 'live-lease', 'cooldown'):
+            with self.subTest(scenario=scenario):
+                self.backend = FakeBackend(self.clock)
+                self.failed_worker()
+                state = self.state()
+                if scenario in ('uncertain', 'reserved', 'verifying'):
+                    state['phase'] = scenario
+                if scenario == 'failed-control-plane': state['actions'][-1]['node'] = 'k8s-rpi3'
+                if scenario == 'unknown-node': state['actions'][-1]['node'] = 'unknown-node'
+                if scenario == 'mismatched-action': state['action_id'] = 'other-action'
+                if scenario == 'cooldown': state['actions'][-1]['at'] = self.clock.now()-100
+                self.backend.lease['metadata']['annotations'][controller.STATE_KEY] = json.dumps(state)
+                if scenario == 'live-lease':
+                    self.backend.lease['spec']['renewTime'] = datetime.fromtimestamp(self.clock.now(), timezone.utc).isoformat()
+                self.backend.bad_snapshot = self.control_plane_sample
+                if scenario == 'worker': self.run_engine()
+                else: self.run_control_plane()
+                self.assertEqual(self.backend.cycles, [])
+                self.assertNotIn('deferred_failure', self.state())
+
+    def test_deferred_failure_survives_aborted_observation_and_requires_exact_acknowledgement(self):
+        action = self.failed_worker()
+        def unsafe(item, count):
+            self.control_plane_sample(item, count)
+            item['control_plane_quorum_ok'] = False
+        self.backend.bad_snapshot = unsafe
+        self.run_control_plane()
+        self.assertEqual(self.backend.cycles, [])
+        self.assertEqual(self.state()['deferred_failure'], action)
+        self.assertEqual(self.state()['phase'], 'idle')
+        self.backend.bad_snapshot = None
+        self.backend.config['acknowledge_action_id'] = 'wrong-action'
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, [])
+        self.backend.config['acknowledge_action_id'] = action['id']
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+        self.assertNotIn('deferred_failure', self.state())
+
+    def test_control_plane_priority_rechecks_roles_and_safety_before_reservation(self):
+        for scenario in ('quorum', 'role-change', 'lost-lease', 'resumed-transmit'):
+            with self.subTest(scenario=scenario):
+                self.backend = FakeBackend(self.clock)
+                self.failed_worker()
+                original_priorities = self.backend.candidate_priorities
+                def changed_priorities():
+                    priorities = original_priorities()
+                    if self.backend.snapshots >= 4: priorities['k8s-rpi2'] = 1
+                    return priorities
+                if scenario == 'role-change': self.backend.candidate_priorities = changed_priorities
+                def final_check(item, count):
+                    self.control_plane_sample(item, count)
+                    if count == 4:
+                        if scenario == 'quorum': item['control_plane_quorum_ok'] = False
+                        if scenario == 'resumed-transmit': item['port']['rx_packets'] += 1
+                        if scenario == 'lost-lease': self.backend.lease['spec']['holderIdentity'] = 'other-observer'
+                self.backend.bad_snapshot = final_check
+                self.run_control_plane()
+                self.assertEqual(self.backend.cycles, [])
+                self.assertIn('deferred_failure', self.state())
+
     def test_historical_overload_cycles_only_after_extended_confirmation_and_fences_replay(self):
         def historical(item, count):
             item.update(pre_failure_at=NOW-600, cpu_pct=82, io_pressure_pct=26)
