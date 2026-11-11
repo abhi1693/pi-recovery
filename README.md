@@ -127,7 +127,6 @@ allowing automatic recovery.
 | `nodes` | Reviewed node addresses, physical NIC MACs, and switch port numbers. |
 | `unifi_origin`, `unifi_api_key` | Controller connection and authentication. |
 | `unifi_certificate_sha256`, `unifi_application_version` | Controller identity and schema pins. |
-
 | `site_id`, `switch_id`, `switch_legacy_id`, `switch_mac` | Explicit switch bindings. |
 | `prometheus_origin`, `node_exporter_port` | Metrics endpoint and node-exporter discovery. |
 | `approved_kernel` | Kernel release permitted by the recovery policy. |
