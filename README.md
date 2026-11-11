@@ -189,3 +189,28 @@ CI reuses the Python and container workflows from
 [`abhi1693/actions`](https://github.com/abhi1693/actions). Images are built on
 native ARM64 runners, checked with a runtime smoke test, scanned, and
 published with SBOMs, provenance, and digest attestations.
+
+Attestation verification must identify the reusable workflow as the signer.
+`--repo` selects this project's attestations, while `--signer-workflow` validates
+the shared build workflow's certificate identity. Repository-only verification
+can reject a valid image because its signer belongs to `abhi1693/actions`.
+See the [GitHub CLI verification documentation](https://cli.github.com/manual/gh_attestation_verify).
+
+For the immutable `v0.0.5` image, verify the image, source tag/commit, shared
+workflow commit, and GitHub-hosted runner policy together:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/abhi1693/pi-recovery@sha256:fe593ca11774c3f175709fd7d899e66f15b3d090554426c4b62d947721f794d0 \
+  --repo abhi1693/pi-recovery \
+  --signer-workflow abhi1693/actions/.github/workflows/container-images.yml \
+  --signer-digest 4bc25a3100cbfbece517ddad161d59d13c029675 \
+  --source-digest 4b3cfb8fb3c6370e35fccf37da340e4e5dc75f9a \
+  --source-ref refs/tags/v0.0.5 \
+  --deny-self-hosted-runners \
+  --format json
+```
+
+For a later release, select its image digest and source commit, then read that
+release's `.github/workflows/ci.yml` to obtain the pinned shared workflow commit.
+Use these reviewed values rather than trusting an unverified provenance payload.
