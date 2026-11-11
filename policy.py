@@ -110,7 +110,8 @@ def validate_config(config):
     require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', config['unifi_application_version']), 'invalid_config')
     require(re.fullmatch(r'[0-9a-f-]{36}', config['site_id'])
             and re.fullmatch(r'[0-9a-f-]{36}', config['switch_id'])
-            and re.fullmatch(r'[0-9a-f]{24}', config['switch_legacy_id']), 'invalid_config')
+            and re.fullmatch(r'(?:[0-9a-f]{24}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})',
+                             config['switch_legacy_id']), 'invalid_config')
     require(config['sample_interval_seconds'] >= 30, 'invalid_config')
 
 

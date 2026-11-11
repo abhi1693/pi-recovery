@@ -63,6 +63,20 @@ def samples():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_legacy_switch_id_accepts_object_id_and_unifi_11_uuid(self):
+        for value in ('a' * 24, '413a819b-394b-403a-8b9f-131085d67b0a'):
+            with self.subTest(value=value):
+                cfg = config(); cfg['switch_legacy_id'] = value
+                validate_config(cfg)
+
+    def test_legacy_switch_id_rejects_malformed_identifiers(self):
+        for value in ('a' * 23, '-' * 36, '413a819b394b-403a-8b9f-131085d67b0a',
+                      '413a819b-394b-403a-8b9f-131085d67b0g'):
+            with self.subTest(value=value):
+                cfg = config(); cfg['switch_legacy_id'] = value
+                with self.assertRaisesRegex(Blocked, 'invalid_config'):
+                    validate_config(cfg)
+
     def test_recent_saturation_is_a_veto_at_the_freshness_boundary(self):
         for key, value in [('cpu_pct', 80), ('memory_pct', 85),
                            ('load_per_core', 2), ('io_pressure_pct', 20)]:
