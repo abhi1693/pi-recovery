@@ -127,6 +127,7 @@ allowing automatic recovery.
 | `nodes` | Reviewed node addresses, physical NIC MACs, and switch port numbers. |
 | `unifi_origin`, `unifi_api_key` | Controller connection and authentication. |
 | `unifi_certificate_sha256`, `unifi_application_version` | Controller identity and schema pins. |
+
 | `site_id`, `switch_id`, `switch_legacy_id`, `switch_mac` | Explicit switch bindings. |
 | `prometheus_origin`, `node_exporter_port` | Metrics endpoint and node-exporter discovery. |
 | `approved_kernel` | Kernel release permitted by the recovery policy. |
@@ -135,6 +136,11 @@ allowing automatic recovery.
 | `cooldown_seconds` | Positive seconds between reservations; default `300`. |
 | `max_unavailable_nodes` | Maximum concurrent unavailable nodes to assess; default `2` for clusters with at least three nodes. |
 | `lease_namespace`, `lease_name` | Durable coordination resource. |
+
+UniFi Network 11 uses UUIDs for legacy switch device IDs. Version 0.0.6 accepts
+both UUID and earlier 24-character device IDs, while requiring an exact configured
+identity match. After a controller upgrade, verify the version, both switch API
+identities, physical MAC and port telemetry before updating the encrypted pins.
 
 `POD_NAMESPACE`, `POD_UID`, and `NODE_NAME` can be populated through Kubernetes'
 downward API. An operator can override the state annotation and maintenance key

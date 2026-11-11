@@ -63,6 +63,20 @@ def samples():
 
 
 class PolicyTests(unittest.TestCase):
+    def test_legacy_switch_id_accepts_object_id_and_unifi_11_uuid(self):
+        for value in ('a' * 24, '413a819b-394b-403a-8b9f-131085d67b0a'):
+            with self.subTest(value=value):
+                cfg = config(); cfg['switch_legacy_id'] = value
+                validate_config(cfg)
+
+    def test_legacy_switch_id_rejects_malformed_identifiers(self):
+        for value in ('a' * 23, '-' * 36, '413a819b394b-403a-8b9f-131085d67b0a',
+                      '413a819b-394b-403a-8b9f-131085d67b0g'):
+            with self.subTest(value=value):
+                cfg = config(); cfg['switch_legacy_id'] = value
+                with self.assertRaisesRegex(Blocked, 'invalid_config'):
+                    validate_config(cfg)
+
     def test_recent_saturation_is_a_veto_at_the_freshness_boundary(self):
         for key, value in [('cpu_pct', 80), ('memory_pct', 85),
                            ('load_per_core', 2), ('io_pressure_pct', 20)]:
@@ -595,7 +609,9 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(self.state()['actions']), 13)
 
     def test_real_switch_stp_response_reaches_the_policy_without_schema_errors(self):
-        cfg = config(); backend = controller.Backend(cfg)
+        cfg = config(); cfg['switch_legacy_id'] = '413a819b-394b-403a-8b9f-131085d67b0a'
+        validate_config(cfg)
+        backend = controller.Backend(cfg)
         port = sample()['port']
         details = {'id': cfg['switch_id'], 'macAddress': cfg['switch_mac'], 'state': 'ONLINE',
                    'interfaces': {'ports': [{'idx': 7, 'state': 'UP', 'poe': {'state': 'UP'}}]}}
@@ -611,6 +627,11 @@ class EngineTests(unittest.TestCase):
             observed = backend.switch('k8s-rpi7')
         item = sample(); item.update(observed)
         snapshot_ok(item, 'k8s-rpi7', cfg, NOW)
+        raw['data'][0]['_id'] = '513a819b-394b-403a-8b9f-131085d67b0a'
+        with patch.object(backend, 'unifi', side_effect=[{'applicationVersion': cfg['unifi_application_version']},
+                                                        details, raw]):
+            with self.assertRaisesRegex(Blocked, 'switch_identity_changed'):
+                backend.switch('k8s-rpi7')
 
     def test_historical_prometheus_evidence_uses_the_requested_time(self):
         backend = controller.Backend(config())
