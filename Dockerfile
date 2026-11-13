@@ -6,7 +6,7 @@ RUN apk upgrade --no-cache musl musl-utils \
     && rm -rf /usr/local/lib/python3.15/site-packages \
     /usr/local/lib/python3.15/ensurepip /usr/local/bin/pip*
 
-ARG APP_VERSION=0.0.5
+ARG APP_VERSION=0.0.7
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Pi Recovery" \
       org.opencontainers.image.description="Guarded Alertmanager-driven PoE recovery" \

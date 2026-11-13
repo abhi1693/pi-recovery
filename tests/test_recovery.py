@@ -63,6 +63,56 @@ def samples():
 
 
 class PolicyTests(unittest.TestCase):
+
+    def test_kernel_allowlist_accepts_only_exact_reviewed_versions(self):
+        cfg = config(); cfg.pop('approved_kernel')
+        cfg['approved_kernels'] = ['7.0.0-1020-raspi', '7.0.0-1023-raspi']
+        validate_config(cfg)
+        for version in cfg['approved_kernels']:
+            item = sample(); item['kernel'] = version
+            snapshot_ok(item, 'k8s-rpi7', cfg, NOW)
+        for version in ('7.0.0-1021-raspi', '7.0.0-1023-raspi-extra', '', '7.0.0-1023'):
+            item = sample(); item['kernel'] = version
+            with self.subTest(version=version), self.assertRaisesRegex(Blocked, 'kernel_not_approved'):
+                snapshot_ok(item, 'k8s-rpi7', cfg, NOW)
+
+    def test_kernel_allowlist_rejects_invalid_or_ambiguous_config(self):
+        for value in ([], '', '7.0.0-1023-raspi', None, [None], [1], ['*'], [''],
+                      ['kernel', 'kernel'], ['kernel '], ['kernel\\n'], ['k'] * 17):
+            cfg = config(); cfg.pop('approved_kernel'); cfg['approved_kernels'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(Blocked, 'invalid_config'):
+                validate_config(cfg)
+        cfg = config(); cfg['approved_kernels'] = ['another']
+        with self.assertRaisesRegex(Blocked, 'invalid_config'):
+            validate_config(cfg)
+
+    def test_kernel_allowlist_environment_and_legacy_compatibility(self):
+        cfg = config(); cfg.pop('approved_kernel')
+        with patch.dict('os.environ', {'APPROVED_KERNELS': '["7.0.0-1020-raspi","7.0.0-1023-raspi"]'}, clear=True):
+            validate_config(cfg)
+            item = sample(); item['kernel'] = '7.0.0-1023-raspi'
+            snapshot_ok(item, 'k8s-rpi7', cfg, NOW)
+        for value in ('', 'not-json', '{}', 'null', '["*"]', '[]'):
+            with patch.dict('os.environ', {'APPROVED_KERNELS': value, 'APPROVED_KERNEL': 'legacy'}, clear=True):
+                with self.subTest(value=value), self.assertRaisesRegex(Blocked, 'invalid_config'):
+                    validate_config(cfg)
+        with patch.dict('os.environ', {'APPROVED_KERNEL': 'approved-test-kernel'}, clear=True):
+            validate_config(cfg)
+            snapshot_ok(sample(), 'k8s-rpi7', cfg, NOW)
+        with patch.dict('os.environ', {'APPROVED_KERNELS': '["other"]'}, clear=True):
+            validate_config(config())
+            snapshot_ok(sample(), 'k8s-rpi7', config(), NOW)
+
+    def test_allowlisted_kernel_preserves_other_recovery_vetoes(self):
+        cfg = config(); cfg.pop('approved_kernel')
+        cfg['approved_kernels'] = ['7.0.0-1020-raspi', '7.0.0-1023-raspi']
+        for key, value in [('maintenance', True), ('control_plane_quorum_ok', False),
+                           ('peers_ready', False), ('boot_age', 0)]:
+            item = sample(); item['kernel'] = '7.0.0-1023-raspi'; item[key] = value
+            with self.subTest(key=key), self.assertRaises(Blocked):
+                snapshot_ok(item, 'k8s-rpi7', cfg, NOW)
+
+
     def test_legacy_switch_id_accepts_object_id_and_unifi_11_uuid(self):
         for value in ('a' * 24, '413a819b-394b-403a-8b9f-131085d67b0a'):
             with self.subTest(value=value):

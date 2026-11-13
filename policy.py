@@ -1,6 +1,7 @@
 """Fail-closed checks for a probable macb TX stall; no network or power operations."""
 from datetime import datetime
 import ipaddress
+import json
 import math
 import os
 import re
@@ -76,11 +77,33 @@ def port_identity(port, expected):
     return 'configured_port'
 
 
+def kernel_allowlist(config):
+    """Resolve an exact, bounded allowlist; never treat kernels as patterns."""
+    require(not ('approved_kernels' in config and 'approved_kernel' in config),
+            'invalid_config')
+    if 'approved_kernels' in config:
+        kernels = config['approved_kernels']
+    elif 'approved_kernel' in config:
+        kernels = [config['approved_kernel']]
+    elif 'APPROVED_KERNELS' in os.environ:
+        try:
+            kernels = json.loads(os.environ['APPROVED_KERNELS'])
+        except (ValueError, TypeError):
+            raise Blocked('invalid_config') from None
+    else:
+        kernels = [os.environ.get('APPROVED_KERNEL', '')]
+    require(isinstance(kernels, list) and 1 <= len(kernels) <= 16, 'invalid_config')
+    require(all(isinstance(k, str) and 0 < len(k) <= 128
+                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+\-]*', k)
+                for k in kernels), 'invalid_config')
+    require(len(set(kernels)) == len(kernels), 'invalid_config')
+    return tuple(kernels)
+
+
 def validate_config(config):
     require(type(config['enabled']) is bool, 'invalid_config')
     require(2 <= len(config['nodes']) <= 64, 'invalid_config')
     config.setdefault('node_exporter_port', int(os.environ.get('NODE_EXPORTER_PORT', '9100')))
-    config.setdefault('approved_kernel', os.environ.get('APPROVED_KERNEL', ''))
     config.setdefault('cooldown_seconds', 300)
     config.setdefault('max_unavailable_nodes', min(2, len(config['nodes'])-1))
     require(type(config['cooldown_seconds']) is int and config['cooldown_seconds'] > 0, 'invalid_config')
@@ -88,8 +111,7 @@ def validate_config(config):
             and 1 <= config['max_unavailable_nodes'] < len(config['nodes']), 'invalid_config')
     require(type(config['node_exporter_port']) is int and 1 <= config['node_exporter_port'] <= 65535,
             'invalid_config')
-    require(isinstance(config['approved_kernel'], str) and 0 < len(config['approved_kernel']) <= 128,
-            'invalid_config')
+    kernel_allowlist(config)
     ports, macs, addresses = set(), set(), set()
     for name, node in config['nodes'].items():
         require(isinstance(name, str) and len(name) <= 253
@@ -156,7 +178,7 @@ def snapshot_ok(snapshot, node, config, now):
     require(snapshot['live_alert'] is True, 'alert_cleared')
     require(snapshot['target_ready'] == 'Unknown', 'node_not_unreachable')
     require(snapshot['maintenance'] is False, 'maintenance')
-    require(snapshot['kernel'] == config['approved_kernel'], 'kernel_not_approved')
+    require(snapshot['kernel'] in kernel_allowlist(config), 'kernel_not_approved')
     require(snapshot['address'] == expected['address'], 'conflicting_identity')
     unavailable = snapshot['unavailable_nodes']
     require(isinstance(unavailable, list) and node in unavailable

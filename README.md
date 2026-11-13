@@ -129,7 +129,8 @@ allowing automatic recovery.
 | `unifi_certificate_sha256`, `unifi_application_version` | Controller identity and schema pins. |
 | `site_id`, `switch_id`, `switch_legacy_id`, `switch_mac` | Explicit switch bindings. |
 | `prometheus_origin`, `node_exporter_port` | Metrics endpoint and node-exporter discovery. |
-| `approved_kernel` | Kernel release permitted by the recovery policy. |
+| `approved_kernels` | Explicit list of exact kernel releases permitted by the recovery policy (1–16 unique entries). |
+| `approved_kernel` | Backward-compatible single release; do not combine with `approved_kernels`. |
 | `webhook_token` | Bearer token required on `/webhook`. |
 | `sample_interval_seconds` | At least 30 seconds between observations. |
 | `cooldown_seconds` | Positive seconds between reservations; default `300`. |
@@ -219,3 +220,11 @@ gh attestation verify \
 For a later release, select its image digest and source commit, then read that
 release's `.github/workflows/ci.yml` to obtain the pinned shared workflow commit.
 Use these reviewed values rather than trusting an unverified provenance payload.
+
+Kernel policy can be supplied through `APPROVED_KERNELS` as a JSON array, for
+example `["7.0.0-1020-raspi","7.0.0-1023-raspi"]`. Explicit configuration wins
+over environment settings. Legacy `APPROVED_KERNEL` remains supported when no
+list is supplied. Invalid or empty lists fail closed, without falling back to
+the legacy variable; wildcards and prefix matching are not supported. This
+changes only the exact kernel gate, not quorum, identity, cooldown, maintenance,
+resource checks, power-cycle fencing or retained recovery state.
