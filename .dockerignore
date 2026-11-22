@@ -2,3 +2,5 @@
 !controller.py
 !policy.py
 !Dockerfile
+
+!fencing.py

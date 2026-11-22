@@ -109,7 +109,9 @@ Legacy failed actions and deferred worker failures migrate on lease acquisition.
 ## Run it
 
 Pi Recovery runs in Kubernetes with a restricted service account. It needs read
-access to nodes and get/update access to its pre-created Lease. The runtime uses
+access to nodes and get/update access to its pre-created Lease. Worker fencing
+also needs read access to node leases, database and storage health, and patch
+permission restricted to the configured worker names. The runtime uses
 the Python standard library and runs as an unprivileged user.
 
 Configuration is loaded from `/etc/pi-recovery/config.json`, or the path set in
@@ -222,3 +224,26 @@ list is supplied. Invalid or empty lists fail closed, without falling back to
 the legacy variable; wildcards and prefix matching are not supported. This
 changes only the exact kernel gate, not quorum, identity, cooldown, maintenance,
 resource checks, power-cycle fencing or retained recovery state.
+
+## Worker storage failover
+
+`POE_ONLY_FENCE_WORKERS` is a JSON list of worker hostnames for which the
+mapped switch port is the sole power source. A cycle whose reply was lost, a
+legacy failure without boot identity, and an ordinary unreachable alert do
+not authorize a power-off. Escalation requires a confirmed cycle followed
+by failed recovery verification and at least 15 minutes without a heartbeat.
+The controller rechecks the node UID and boot, worker role, healthy peers,
+database quorum, attached Longhorn volumes and surviving RW replicas.
+
+Before sending the power-off request it records the intent in the Lease.
+UniFi's device configuration API writes the complete port override list. The
+controller compares two reads, preserves all other overrides and changes
+only the verified port's PoE mode. Serialize manual switch configuration
+edits with fencing because the device API accepts a whole-list update.
+An uncertain write is never repeated. The controller must subsequently see
+the administrative override off, no link and zero power in fresh telemetry
+over at least 30 seconds. It then uses a UID and resourceVersion checked
+Kubernetes patch to add the out-of-service taint. Kubernetes handles workload
+eviction and volume detachment. The controller never turns a port back on or
+removes that taint. Restore the worker explicitly after checking replacement
+writers and storage health.

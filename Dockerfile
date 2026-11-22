@@ -6,7 +6,7 @@ RUN apk upgrade --no-cache musl musl-utils \
     && rm -rf /usr/local/lib/python3.15/site-packages \
     /usr/local/lib/python3.15/ensurepip /usr/local/bin/pip*
 
-ARG APP_VERSION=0.0.8
+ARG APP_VERSION=0.0.9
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Pi Recovery" \
       org.opencontainers.image.description="Guarded Alertmanager-driven PoE recovery" \
@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.title="Pi Recovery" \
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY --chmod=0444 controller.py policy.py /app/
+COPY --chmod=0444 controller.py policy.py fencing.py /app/
 USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["python3", "-u", "/app/controller.py"]

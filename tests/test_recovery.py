@@ -631,6 +631,15 @@ class EngineTests(unittest.TestCase):
             with self.assertRaisesRegex(Blocked, 'stale_metrics'):
                 backend.scalar('cpu-query')
 
+    def test_failed_verification_records_identity_for_fencing_only_after_accepted_cycle(self):
+        self.backend.recovered = lambda node, old: False
+        self.run_engine()
+        self.assertEqual(self.state()['phase'], 'failed')
+        action = self.state()['actions'][-1]
+        self.assertTrue(action['verified_cycle_failed'])
+        self.assertTrue(action['uid'] and action['boot'])
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+
     def test_uncertain_power_request_is_never_retried(self):
         self.backend.failure = TimeoutError('request may have reached switch')
         self.run_engine(); self.run_engine()

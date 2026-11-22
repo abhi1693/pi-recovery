@@ -22,6 +22,8 @@ import time
 import urllib.parse
 import uuid
 
+import fencing
+
 from policy import Blocked, alert_target, confirm, cooldown_ok, epoch, exporter_instance, number, port_identity, require, resource_context, review_required, snapshot_ok, validate_config
 
 STATE_KEY = os.environ.get('PI_RECOVERY_STATE_KEY', 'pi-recovery.io/state')
@@ -82,7 +84,7 @@ class Transport:
             payload = json.dumps(body).encode() if body is not None else None
             request_headers = {'Accept': 'application/json', **(headers or {})}
             if payload is not None:
-                request_headers['Content-Type'] = 'application/json'
+                request_headers['Content-Type'] = ('application/json-patch+json' if method == 'PATCH' else 'application/json')
             conn.request(method, path, body=payload, headers=request_headers)
             response = conn.getresponse()
             data = response.read(4 * 1024 * 1024 + 1)
@@ -339,7 +341,22 @@ class Ledger:
         state['phase'] = 'observing'
         self.write(lease, state)
 
-    def transition(self, phase, node, action_id=None, pre_failure_at=None):
+    def assert_fence_owner(self, node, action_id):
+        lease, state = self.read()
+        require(lease['spec'].get('holderIdentity') == self.backend.holder and state['phase'] == 'observing'
+                and 0 <= time.time() - epoch(lease['spec']['renewTime']) < 600, 'lost_recovery_lock')
+        incident = state.get('unresolved', {}).get(node, {})
+        require(incident.get('id') == action_id and incident.get('verified_cycle_failed'), 'fence_incident_changed')
+        return lease, state
+
+    def mark_fence(self, node, action_id):
+        lease, state = self.assert_fence_owner(node, action_id)
+        incident = state['unresolved'][node]
+        require(not incident.get('power_off_requested'), 'fence_write_already_requested')
+        incident['power_off_requested'] = True
+        self.write(lease, state)
+
+    def transition(self, phase, node, action_id=None, pre_failure_at=None, identity=None):
         lease, state = self.read()
         require(lease.get('spec', {}).get('holderIdentity') == self.backend.holder, 'lost_recovery_lock')
         require(0 <= time.time() - epoch(lease['spec']['renewTime']) < 600, 'expired_recovery_lock')
@@ -355,8 +372,12 @@ class Ledger:
                         'same_outage_already_attempted')
                 del state['unresolved'][node]
             state['actions'] = [a for a in state['actions'] if time.time() - a['at'] < 86400][-127:]
-            state['actions'].append({'node': node, 'at': time.time(), 'id': action_id})
+            state['actions'].append({'node': node, 'at': time.time(), 'id': action_id,
+                                     'uid': identity['node_uid'], 'boot': identity['boot_id']})
             state['action_id'] = action_id
+        if phase == 'failed':
+            require(state['phase'] == 'verifying', 'invalid_recovery_phase')
+            state['actions'][-1]['verified_cycle_failed'] = True
         state['phase'] = phase
         self.write(lease, state)
         if phase in ('idle', 'completed', 'failed', 'uncertain'):
@@ -372,6 +393,29 @@ class Engine:
         self.ledger = ledger or Ledger(backend)
         self.wait = wait or STOP.wait
 
+    def resume_fences(self):
+        """Continue a durable escalation even if Alertmanager's original alert has aged out."""
+        if not self.backend.config['enabled'] or not os.environ.get('POE_ONLY_FENCE_WORKERS'):
+            return
+        _, state = self.ledger.read()
+        incidents = dict(state.get('unresolved', {}))
+        if state['phase'] == 'failed' and state['actions']:
+            action = state['actions'][-1]
+            incidents[action['node']] = action
+        allowed = json.loads(os.environ['POE_ONLY_FENCE_WORKERS'])
+        for node, action in incidents.items():
+            if node not in allowed or not action.get('verified_cycle_failed') or time.time() - action['at'] < 900:
+                continue
+            target = self.backend.node(node)
+            if (fencing.ready(target) or target['status']['nodeInfo']['bootID'] != action['boot']
+                    or any(t['key'] == fencing.OUT_OF_SERVICE for t in target['spec'].get('taints', []))):
+                continue
+            self.ledger.acquire(node)
+            try:
+                fencing.reconcile(self.backend, self.ledger, node, self.wait, event)
+            finally:
+                self.ledger.transition('idle', node)
+
     def run(self, alert):
         node = None
         locked = reserved = False
@@ -381,6 +425,8 @@ class Engine:
             event('lease_requested', node=node)
             self.ledger.acquire(node); locked = True
             event('lease_acquired', node=node, holder=self.backend.holder)
+            if self.backend.config['enabled'] and fencing.reconcile(self.backend, self.ledger, node, self.wait, event):
+                return
             samples = []
             for index in range(7):
                 require(not STOP.is_set(), 'shutting_down')
@@ -420,7 +466,7 @@ class Engine:
             if previous:
                 require(samples[-1]['pre_failure_at'] > previous['at'], 'same_outage_already_attempted')
             reserved = True  # An ambiguous reservation write must never be cleared in finally.
-            self.ledger.transition('reserved', node, action_id, samples[-1]['pre_failure_at'])
+            self.ledger.transition('reserved', node, action_id, samples[-1]['pre_failure_at'], identity)
             event('reserved', node=node, action_id=action_id, port_identity=identity['port_identity'])
             self.backend.cycle(node)
             self.ledger.transition('verifying', node)
@@ -472,7 +518,16 @@ def make_server(config, backend=None, address=('0.0.0.0', 8080)):
     pending = queue.PriorityQueue(maxsize=8)
     sequence = itertools.count()
     def worker():
+        next_fence_check = 0
         while not STOP.is_set():
+            if time.monotonic() >= next_fence_check:
+                next_fence_check = time.monotonic() + 60
+                try:
+                    engine.resume_fences()
+                except Blocked as error:
+                    event('fence_pending', reason=str(error))
+                except Exception as error:
+                    event('fence_error', error_type=type(error).__name__)
             try:
                 _, _, alert = pending.get(timeout=1)
             except queue.Empty:
