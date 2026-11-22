@@ -368,22 +368,8 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(alert_target(alert(), config(), NOW), 'k8s-rpi7')
 
     def test_global_cooldown_and_ambiguous_action_hold_survive_restarts(self):
-        cases = [({'phase': 'uncertain', 'actions': []}, 'recovery_interlock'),
-                 ({'phase': 'failed', 'actions': []}, 'recovery_interlock'),
-                 ({'phase': 'reserved', 'actions': []}, 'recovery_interlock'),
-                 ({'phase': 'verifying', 'actions': []}, 'recovery_interlock'),
-                 ({'phase': 'completed', 'actions': [{'node': 'k8s-rpi1', 'at': NOW-100}]}, 'global_cooldown'),
-                 ]
-        for state, reason in cases:
-            with self.subTest(reason=reason), self.assertRaisesRegex(Blocked, reason):
-                cooldown_ok(copy.deepcopy(state), 'k8s-rpi7', NOW)
-
-    def test_same_node_can_recover_again_after_the_global_cooldown(self):
-        state = {'phase': 'completed', 'actions': [{'node': 'k8s-rpi7', 'at': NOW-1801}]}
-        cooldown_ok(state, 'k8s-rpi7', NOW)
-        for phase in ('reserved', 'verifying'):
-            with self.subTest(phase=phase), self.assertRaisesRegex(Blocked, 'recovery_interlock'):
-                cooldown_ok({**state, 'phase': phase}, 'k8s-rpi7', NOW)
+        with self.assertRaisesRegex(Blocked, 'global_cooldown'):
+            cooldown_ok({'actions': [{'node': 'k8s-rpi1', 'at': NOW-100}]}, 'k8s-rpi7', NOW)
 
     def test_completed_history_does_not_impose_a_node_or_cluster_daily_limit(self):
         actions = [{'node': 'k8s-rpi7', 'at': NOW-2000*(i+1)} for i in range(12)]
@@ -452,82 +438,25 @@ class EngineTests(unittest.TestCase):
         target = alert(); target['labels']['instance'] = '192.168.3.102:9796'
         controller.Engine(self.backend, wait=self.clock.wait).run(target)
 
-    def test_failed_worker_yields_to_control_plane_and_remains_interlocked_after_success(self):
+    def test_legacy_failed_worker_allows_unrelated_worker_recovery(self):
         action = self.failed_worker()
-        self.backend.bad_snapshot = self.control_plane_sample
-        self.run_control_plane()
-        self.assertEqual(self.backend.cycles, ['k8s-rpi2'])
-        self.assertEqual(self.state()['phase'], 'completed')
-        self.assertEqual(self.state()['deferred_failure'], action)
-        self.assertTrue(review_required(self.state(), self.clock.now()))
-        self.assertEqual(self.state()['actions'][0], action)
-        self.clock.value += 1000
-        self.backend.bad_snapshot = None
-        self.run_engine()
-        self.assertEqual(self.backend.cycles, ['k8s-rpi2'])
-
-    def test_failed_worker_priority_never_overrides_other_interlocks_or_live_lease(self):
-        for scenario in ('worker', 'uncertain', 'reserved', 'verifying', 'failed-control-plane',
-                         'unknown-node', 'mismatched-action', 'live-lease', 'cooldown'):
-            with self.subTest(scenario=scenario):
-                self.backend = FakeBackend(self.clock)
-                self.failed_worker()
-                state = self.state()
-                if scenario in ('uncertain', 'reserved', 'verifying'):
-                    state['phase'] = scenario
-                if scenario == 'failed-control-plane': state['actions'][-1]['node'] = 'k8s-rpi3'
-                if scenario == 'unknown-node': state['actions'][-1]['node'] = 'unknown-node'
-                if scenario == 'mismatched-action': state['action_id'] = 'other-action'
-                if scenario == 'cooldown': state['actions'][-1]['at'] = self.clock.now()-100
-                self.backend.lease['metadata']['annotations'][controller.STATE_KEY] = json.dumps(state)
-                if scenario == 'live-lease':
-                    self.backend.lease['spec']['renewTime'] = datetime.fromtimestamp(self.clock.now(), timezone.utc).isoformat()
-                self.backend.bad_snapshot = self.control_plane_sample
-                if scenario == 'worker': self.run_engine()
-                else: self.run_control_plane()
-                self.assertEqual(self.backend.cycles, [])
-                self.assertNotIn('deferred_failure', self.state())
-
-    def test_deferred_failure_survives_aborted_observation_and_requires_exact_acknowledgement(self):
-        action = self.failed_worker()
-        def unsafe(item, count):
-            self.control_plane_sample(item, count)
-            item['control_plane_quorum_ok'] = False
-        self.backend.bad_snapshot = unsafe
-        self.run_control_plane()
-        self.assertEqual(self.backend.cycles, [])
-        self.assertEqual(self.state()['deferred_failure'], action)
-        self.assertEqual(self.state()['phase'], 'idle')
-        self.backend.bad_snapshot = None
-        self.backend.config['acknowledge_action_id'] = 'wrong-action'
-        self.run_engine()
-        self.assertEqual(self.backend.cycles, [])
-        self.backend.config['acknowledge_action_id'] = action['id']
+        action['node'] = 'k8s-rpi6'
+        self.backend.lease['metadata']['annotations'][controller.STATE_KEY] = json.dumps(
+            {'phase': 'failed', 'action_id': action['id'], 'actions': [action]})
         self.run_engine()
         self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
-        self.assertNotIn('deferred_failure', self.state())
+        self.assertEqual(self.state()['unresolved']['k8s-rpi6'], action)
 
-    def test_control_plane_priority_rechecks_roles_and_safety_before_reservation(self):
-        for scenario in ('quorum', 'role-change', 'lost-lease', 'resumed-transmit'):
-            with self.subTest(scenario=scenario):
-                self.backend = FakeBackend(self.clock)
-                self.failed_worker()
-                original_priorities = self.backend.candidate_priorities
-                def changed_priorities():
-                    priorities = original_priorities()
-                    if self.backend.snapshots >= 4: priorities['k8s-rpi2'] = 1
-                    return priorities
-                if scenario == 'role-change': self.backend.candidate_priorities = changed_priorities
-                def final_check(item, count):
-                    self.control_plane_sample(item, count)
-                    if count == 4:
-                        if scenario == 'quorum': item['control_plane_quorum_ok'] = False
-                        if scenario == 'resumed-transmit': item['port']['rx_packets'] += 1
-                        if scenario == 'lost-lease': self.backend.lease['spec']['holderIdentity'] = 'other-observer'
-                self.backend.bad_snapshot = final_check
-                self.run_control_plane()
-                self.assertEqual(self.backend.cycles, [])
-                self.assertIn('deferred_failure', self.state())
+    def test_same_outage_needs_new_healthy_scrape_before_another_reservation(self):
+        action = self.failed_worker()
+        self.backend.bad_snapshot = lambda row, count: row.update(pre_failure_at=action['at']-1)
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, [])
+        self.assertEqual(self.state()['unresolved']['k8s-rpi7'], action)
+        self.backend.bad_snapshot = None
+        self.run_engine()
+        self.assertEqual(self.backend.cycles, ['k8s-rpi7'])
+        self.assertFalse(self.state()['unresolved'])
 
     def test_historical_overload_cycles_only_after_extended_confirmation_and_fences_replay(self):
         def historical(item, count):

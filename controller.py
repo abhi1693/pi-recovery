@@ -318,40 +318,48 @@ class Ledger:
         lease, state = self.read()
         now = time.time()
         acknowledge = self.backend.config.get('acknowledge_action_id', '')
-        priorities = (self.backend.candidate_priorities()
-                      if state.get('phase') == 'failed' or state.get('deferred_failure') else None)
-        cooldown_ok(state, node, now, acknowledge,
-                    self.backend.config.get('cooldown_seconds', 300), priorities=priorities)
+        # Convert previous releases' terminal or abandoned reservations to per-node history.
+        pending = state.setdefault('unresolved', {})
+        deferred = state.pop('deferred_failure', None)
+        if deferred:
+            pending[deferred['node']] = deferred
+        if state['phase'] in ('reserved', 'verifying', 'failed', 'uncertain'):
+            actions = state['actions']
+            require(bool(actions) and actions[-1].get('id') == state.get('action_id')
+                    and actions[-1].get('node') in self.backend.config['nodes'], 'invalid_recovery_ledger')
+            action = actions[-1]
+            pending[action['node']] = action
+        if node in pending and acknowledge and pending[node]['id'] == acknowledge:
+            del pending[node]
+        cooldown_ok({'actions': state['actions']}, node, now,
+                    cooldown_seconds=self.backend.config.get('cooldown_seconds', 300))
         spec = lease.get('spec', {})
         if spec.get('holderIdentity') and spec['holderIdentity'] != self.backend.holder:
             require(now - epoch(spec['renewTime']) > spec['leaseDurationSeconds'], 'another_recovery_running')
-        if state.get('deferred_failure', {}).get('id') == acknowledge:
-            state.pop('deferred_failure')
-        if state.get('phase') == 'failed' and state.get('action_id') != acknowledge:
-            # Keep the worker's unresolved failure across observations, completion and restarts.
-            state['deferred_failure'] = copy.deepcopy(state['actions'][-1])
-        deferred = state.get('deferred_failure')
         state['phase'] = 'observing'
-        self.write(lease, state)  # resourceVersion fences both replicas; conflicts fail closed.
-        if deferred:
-            event('worker_failure_deferred', node=node, failed_node=deferred['node'],
-                  failed_action_id=deferred['id'])
+        self.write(lease, state)
 
-    def transition(self, phase, node, action_id=None):
+    def transition(self, phase, node, action_id=None, pre_failure_at=None):
         lease, state = self.read()
         require(lease.get('spec', {}).get('holderIdentity') == self.backend.holder, 'lost_recovery_lock')
         require(0 <= time.time() - epoch(lease['spec']['renewTime']) < 600, 'expired_recovery_lock')
+        if phase == 'uncertain':
+            require(state['phase'] in ('reserved', 'verifying') and state.get('action_id') == action_id,
+                    'no_matching_reservation')
         if phase == 'reserved':
             require(state['phase'] == 'observing', 'invalid_recovery_phase')
-            priorities = self.backend.candidate_priorities() if state.get('deferred_failure') else None
-            cooldown_ok(state, node, time.time(), cooldown_seconds=self.backend.config.get('cooldown_seconds', 300),
-                        priorities=priorities)
+            cooldown_ok(state, node, time.time(), cooldown_seconds=self.backend.config.get('cooldown_seconds', 300))
+            previous = state.get('unresolved', {}).get(node)
+            if previous:
+                require(pre_failure_at is not None and number(pre_failure_at) > number(previous['at']),
+                        'same_outage_already_attempted')
+                del state['unresolved'][node]
             state['actions'] = [a for a in state['actions'] if time.time() - a['at'] < 86400][-127:]
             state['actions'].append({'node': node, 'at': time.time(), 'id': action_id})
             state['action_id'] = action_id
         state['phase'] = phase
         self.write(lease, state)
-        if phase in ('idle', 'completed'):
+        if phase in ('idle', 'completed', 'failed', 'uncertain'):
             lease, state = self.read()
             require(lease['spec']['holderIdentity'] == self.backend.holder, 'lost_recovery_lock')
             lease['spec']['holderIdentity'] = ''
@@ -407,8 +415,12 @@ class Engine:
                 event('would_cycle', node=node)
                 return
             action_id = str(uuid.uuid4())
+            _, current = self.ledger.read()
+            previous = current.get('unresolved', {}).get(node)
+            if previous:
+                require(samples[-1]['pre_failure_at'] > previous['at'], 'same_outage_already_attempted')
             reserved = True  # An ambiguous reservation write must never be cleared in finally.
-            self.ledger.transition('reserved', node, action_id)
+            self.ledger.transition('reserved', node, action_id, samples[-1]['pre_failure_at'])
             event('reserved', node=node, action_id=action_id, port_identity=identity['port_identity'])
             self.backend.cycle(node)
             self.ledger.transition('verifying', node)
@@ -434,7 +446,7 @@ class Engine:
             event('blocked', node=node, reason=str(error), **context)
             if reserved:
                 try:
-                    self.ledger.transition('uncertain', node)
+                    self.ledger.transition('uncertain', node, action_id)
                 except Exception:
                     pass  # The persisted reservation itself prevents another action.
         except Exception as error:
@@ -442,7 +454,7 @@ class Engine:
             event('error', node=node, error_type=type(error).__name__)
             if reserved:
                 try:
-                    self.ledger.transition('uncertain', node)
+                    self.ledger.transition('uncertain', node, action_id)
                 except Exception:
                     pass
         finally:
@@ -493,7 +505,7 @@ def make_server(config, backend=None, address=('0.0.0.0', 8080)):
                     lines = [f'pi_recovery_events_total{{outcome="{k}"}} {v}' for k, v in sorted(COUNTERS.items())]
                 try:
                     _, state = engine.ledger.read()
-                    lines += [f'pi_recovery_interlock_active {int(bool(state.get("deferred_failure")) or state.get("phase") in ("reserved", "verifying", "failed", "uncertain"))}',
+                    lines += [f'pi_recovery_interlock_active {int(state.get("phase") in ("reserved", "verifying"))}',
                               f'pi_recovery_review_required {int(review_required(state, time.time()))}',
                               'pi_recovery_ledger_read_ok 1']
                 except Exception:

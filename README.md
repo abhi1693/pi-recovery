@@ -89,8 +89,7 @@ attempt rather than to a permanent primary.
 | Cooldown | Five minutes between reservations by default; configurable with `cooldown_seconds`. |
 | Daily quotas | No per-node or cluster-wide daily cap. |
 | Active recovery | Another cycle is blocked while an action is reserved or being verified. |
-| Failed worker | After the Lease and cooldown expire, a control-plane recovery may proceed; the worker failure stays interlocked and requires review. |
-| Uncertain result | Ambiguous actions and failed control-plane recoveries block automation pending review. |
+| Failed or ambiguous result | Affects only the same node and outage. |
 | Repeat delivery | A persisted reservation prevents a repeated alert from issuing another cycle. |
 
 The action is recorded **before** the non-idempotent switch request. Ambiguous
@@ -101,16 +100,11 @@ final pre-cycle check enforce control-plane priority, so alert arrival order
 cannot let a worker bypass an unavailable control-plane node. Recent action
 history is bounded for storage; it does not impose a daily recovery quota.
 
-A failed worker action cannot indefinitely block a later control-plane recovery.
-Only an explicit `failed` result with a matching recorded action and live
-Kubernetes role inventory qualifies. Active and ambiguous actions never yield
-automatically. The expired Lease is acquired with resourceVersion fencing, and
-all evidence and final safety checks still run before a new cycle. The prior
-worker action is retained as `deferred_failure`, survives unsuccessful checks and
-successful control-plane recovery, and keeps review metrics active. Workers stay
-blocked until `acknowledge_action_id` matches that retained failure through the
-normal configuration workflow. A failed control-plane recovery still blocks all
-subsequent automatic cycles.
+Once the active lease and cooldown permit another observation, a previous
+failed or ambiguous request is retained per node. A repeat request for that
+node needs proof of a successful exporter scrape after the reservation, or
+an explicit acknowledgement. Other nodes proceed through normal checks.
+Legacy failed actions and deferred worker failures migrate on lease acquisition.
 
 ## Run it
 
